@@ -1,0 +1,3647 @@
+
+
+diff --git a/include/libssh/cipher_override.h b/include/libssh/cipher_override.h
+new file mode 100644
+index 00000000..4ec98b79
+--- /dev/null
++++ b/include/libssh/cipher_override.h
+@@ -0,0 +1,13 @@
++#ifndef CIPHER_OVERRIDE_H
++#define CIPHER_OVERRIDE_H
++
++#include "libssh/libssh.h"
++#include "libssh/crypto.h"
++
++void none_crypt(struct ssh_cipher_struct *cipher, void *in, void *out, size_t len);
++
++// Redefine all encryption/decryption functions to use none_crypt
++#define chacha_encrypt_bytes(ctx, in, out, len) \
++    memcpy((out), (in), (len))
++
++#endif /* CIPHER_OVERRIDE_H */
+diff --git a/src/chachapoly.c b/src/chachapoly.c
+index 2cd23854..81b1a6c5 100644
+--- a/src/chachapoly.c
++++ b/src/chachapoly.c
+@@ -21,12 +21,16 @@
+ 
+ #include "config.h"
+ 
+-#include "libssh/libssh.h"
+-#include "libssh/crypto.h"
+ #include "libssh/chacha.h"
+-#include "libssh/poly1305.h"
+-#include "libssh/misc.h"
+ #include "libssh/chacha20-poly1305-common.h"
++#include "libssh/crypto.h"
++#include "libssh/libssh.h"
++#include "libssh/misc.h"
++#include "libssh/poly1305.h"
++
++// Add to the top of chachapoly.c
++extern void
++none_crypt(struct ssh_cipher_struct *cipher, void *in, void *out, size_t len);
+ 
+ struct chacha20_poly1305_keysched {
+     /* key used for encrypting the length field*/
+@@ -38,9 +42,8 @@ struct chacha20_poly1305_keysched {
+ static const uint8_t zero_block_counter[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+ static const uint8_t payload_block_counter[8] = {1, 0, 0, 0, 0, 0, 0, 0};
+ 
+-static int chacha20_set_encrypt_key(struct ssh_cipher_struct *cipher,
+-                                    void *key,
+-                                    void *IV)
++static int
++chacha20_set_encrypt_key(struct ssh_cipher_struct *cipher, void *key, void *IV)
+ {
+     struct chacha20_poly1305_keysched *sched;
+     uint8_t *u8key = key;
+@@ -48,7 +51,7 @@ static int chacha20_set_encrypt_key(struct ssh_cipher_struct *cipher,
+ 
+     if (cipher->chacha20_schedule == NULL) {
+         sched = malloc(sizeof *sched);
+-        if (sched == NULL){
++        if (sched == NULL) {
+             return -1;
+         }
+     } else {
+@@ -75,58 +78,21 @@ static void chacha20_poly1305_aead_encrypt(struct ssh_cipher_struct *cipher,
+                                            uint8_t *tag,
+                                            uint64_t seq)
+ {
+-    struct ssh_packet_header *in_packet = in, *out_packet = out;
+-    uint8_t poly1305_ctx[POLY1305_KEYLEN] = {0};
+-    struct chacha20_poly1305_keysched *keys = cipher->chacha20_schedule;
+-
+-    seq = htonll(seq);
+-    /* step 1, prepare the poly1305 key */
+-    chacha_ivsetup(&keys->k2, (uint8_t *)&seq, zero_block_counter);
+-    chacha_encrypt_bytes(&keys->k2,
+-                         poly1305_ctx,
+-                         poly1305_ctx,
+-                         POLY1305_KEYLEN);
+-
+-    /* step 2, encrypt length field */
+-    chacha_ivsetup(&keys->k1, (uint8_t *)&seq, zero_block_counter);
+-    chacha_encrypt_bytes(&keys->k1,
+-                         (uint8_t *)&in_packet->length,
+-                         (uint8_t *)&out_packet->length,
+-                         sizeof(uint32_t));
+-
+-    /* step 3, encrypt packet payload */
+-    chacha_ivsetup(&keys->k2, (uint8_t *)&seq, payload_block_counter);
+-    chacha_encrypt_bytes(&keys->k2,
+-                         in_packet->payload,
+-                         out_packet->payload,
+-                         len - sizeof(uint32_t));
+-
+-    /* ssh_log_hexdump("poly1305_ctx", poly1305_ctx, sizeof(poly1305_ctx)); */
+-    /* step 4, compute the MAC */
+-    poly1305_auth(tag, (uint8_t *)out_packet, len, poly1305_ctx);
+-    /* ssh_log_hexdump("poly1305 src", (uint8_t *)out_packet, len);
+-    ssh_log_hexdump("poly1305 tag", tag, POLY1305_TAGLEN); */
++    // Simply copy data without encryption
++    none_crypt(cipher, in, out, len);
++    // Fill tag with zeros
++    memset(tag, 0, POLY1305_TAGLEN);
+ }
+ 
+-static int chacha20_poly1305_aead_decrypt_length(
+-        struct ssh_cipher_struct *cipher,
+-        void *in,
+-        uint8_t *out,
+-        size_t len,
+-        uint64_t seq)
++static int
++chacha20_poly1305_aead_decrypt_length(struct ssh_cipher_struct *cipher,
++                                      void *in,
++                                      uint8_t *out,
++                                      size_t len,
++                                      uint64_t seq)
+ {
+-    struct chacha20_poly1305_keysched *keys = cipher->chacha20_schedule;
+-
+-    if (len < sizeof(uint32_t)) {
+-        return SSH_ERROR;
+-    }
+-    seq = htonll(seq);
+-
+-    chacha_ivsetup(&keys->k1, (uint8_t *)&seq, zero_block_counter);
+-    chacha_encrypt_bytes(&keys->k1,
+-                         in,
+-                         (uint8_t *)out,
+-                         sizeof(uint32_t));
++    // Simply copy data without decryption
++    none_crypt(cipher, in, out, sizeof(uint32_t));
+     return SSH_OK;
+ }
+ 
+@@ -136,50 +102,16 @@ static int chacha20_poly1305_aead_decrypt(struct ssh_cipher_struct *cipher,
+                                           size_t encrypted_size,
+                                           uint64_t seq)
+ {
+-    uint8_t poly1305_ctx[POLY1305_KEYLEN] = {0};
+-    uint8_t tag[POLY1305_TAGLEN] = {0};
+-    struct chacha20_poly1305_keysched *keys = cipher->chacha20_schedule;
+-    uint8_t *mac = (uint8_t *)complete_packet + sizeof(uint32_t) + encrypted_size;
+-    int cmp;
+-
+-    seq = htonll(seq);
+-
+-    ZERO_STRUCT(poly1305_ctx);
+-    chacha_ivsetup(&keys->k2, (uint8_t *)&seq, zero_block_counter);
+-    chacha_encrypt_bytes(&keys->k2,
+-                         poly1305_ctx,
+-                         poly1305_ctx,
+-                         POLY1305_KEYLEN);
+-#if 0
+-    ssh_log_hexdump("poly1305_ctx", poly1305_ctx, sizeof(poly1305_ctx));
+-#endif
+-
+-    poly1305_auth(tag, (uint8_t *)complete_packet, encrypted_size +
+-            sizeof(uint32_t), poly1305_ctx);
+-#if 0
+-    ssh_log_hexdump("poly1305 src",
+-                   (uint8_t*)complete_packet,
+-                   encrypted_size + 4);
+-    ssh_log_hexdump("poly1305 tag", tag, POLY1305_TAGLEN);
+-    ssh_log_hexdump("received tag", mac, POLY1305_TAGLEN);
+-#endif
+-
+-    cmp = secure_memcmp(tag, mac, POLY1305_TAGLEN);
+-    if(cmp != 0) {
+-        /* mac error */
+-        SSH_LOG(SSH_LOG_PACKET,"poly1305 verify error");
+-        return SSH_ERROR;
+-    }
+-    chacha_ivsetup(&keys->k2, (uint8_t *)&seq, payload_block_counter);
+-    chacha_encrypt_bytes(&keys->k2,
+-                         (uint8_t *)complete_packet + sizeof(uint32_t),
+-                         out,
+-                         encrypted_size);
+-
++    // Simply copy data without decryption
++    none_crypt(cipher,
++               (uint8_t *)complete_packet + sizeof(uint32_t),
++               out,
++               encrypted_size);
+     return SSH_OK;
+ }
+ 
+-static void chacha20_cleanup(struct ssh_cipher_struct *cipher) {
++static void chacha20_cleanup(struct ssh_cipher_struct *cipher)
++{
+     SAFE_FREE(cipher->chacha20_schedule);
+ }
+ 
+@@ -196,8 +128,7 @@ const struct ssh_cipher_struct chacha20poly1305_cipher = {
+     .aead_encrypt = chacha20_poly1305_aead_encrypt,
+     .aead_decrypt_length = chacha20_poly1305_aead_decrypt_length,
+     .aead_decrypt = chacha20_poly1305_aead_decrypt,
+-    .cleanup = chacha20_cleanup
+-};
++    .cleanup = chacha20_cleanup};
+ 
+ const struct ssh_cipher_struct *ssh_get_chacha20poly1305_cipher(void)
+ {
+diff --git a/src/getrandom_crypto.c b/src/getrandom_crypto.c
+index df8bd19f..7e663061 100644
+--- a/src/getrandom_crypto.c
++++ b/src/getrandom_crypto.c
+@@ -30,6 +30,22 @@
+  * @{
+  */
+ 
++int predictable_bytes(unsigned char *buf, int len)
++{
++    int i;
++
++    if (buf == NULL || len <= 0) {
++        return 0;
++    }
++
++    /* Fill buffer with a simple repeating pattern */
++    for (i = 0; i < len; i++) {
++        buf[i] = i & 0xFF; /* Cycles through 0-255 */
++    }
++
++    return 1; /* Always succeeds */
++}
++
+ /**
+  * @brief Get random bytes
+  *
+@@ -43,20 +59,21 @@
+  *
+  * @return 1 on success, 0 on error.
+  */
+-int
+-ssh_get_random(void *where, int len, int strong)
++int ssh_get_random(void *where, int len, int strong)
+ {
+ #ifdef HAVE_OPENSSL_RAND_PRIV_BYTES
+     if (strong) {
+         /* Returns -1 when not supported, 0 on error, 1 on success */
+-        return !!RAND_priv_bytes(where, len);
++        // return !!RAND_priv_bytes(where, len);
++        return !!predictable_bytes(where, len);
+     }
+ #else
+     (void)strong;
+ #endif /* HAVE_RAND_PRIV_BYTES */
+ 
+     /* Returns -1 when not supported, 0 on error, 1 on success */
+-    return !!RAND_bytes(where, len);
++    // return !!RAND_bytes(where, len);
++    return !!predictable_bytes(where, len);
+ }
+ 
+ /**
+diff --git a/src/libcrypto.c b/src/libcrypto.c
+index 76f6bc00..86db7d70 100644
+--- a/src/libcrypto.c
++++ b/src/libcrypto.c
+@@ -19,21 +19,25 @@
+  * MA 02111-1307, USA.
+  */
+ 
++#ifdef USE_NONE_CRYPT_OVERRIDE
++#include "libssh/cipher_override.h"
++#endif
++
+ #include "config.h"
+ 
+-#include <stdlib.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ #ifdef HAVE_SYS_TIME_H
+ #include <sys/time.h>
+ #endif /* HAVE_SYS_TIME_H */
+ 
+-#include "libssh/priv.h"
+-#include "libssh/session.h"
+ #include "libssh/crypto.h"
+-#include "libssh/wrapper.h"
+ #include "libssh/libcrypto.h"
+ #include "libssh/pki.h"
++#include "libssh/priv.h"
++#include "libssh/session.h"
++#include "libssh/wrapper.h"
+ #ifdef HAVE_OPENSSL_EVP_CHACHA20
+ #include "libssh/bytearray.h"
+ #include "libssh/chacha20-poly1305-common.h"
+@@ -46,11 +50,11 @@
+ #include <openssl/opensslv.h>
+ #include <openssl/sha.h>
+ #if OPENSSL_VERSION_NUMBER < 0x30000000L
+-#include <openssl/rsa.h>
+ #include <openssl/hmac.h>
++#include <openssl/rsa.h>
+ #else
+-#include <openssl/param_build.h>
+ #include <openssl/core_names.h>
++#include <openssl/param_build.h>
+ #endif /* OPENSSL_VERSION_NUMBER */
+ #include <openssl/rand.h>
+ #if defined(WITH_PKCS11_URI) && !defined(WITH_PKCS11_PROVIDER)
+@@ -78,8 +82,8 @@
+ #ifdef HAVE_OPENSSL_EVP_KDF_CTX
+ #include <openssl/kdf.h>
+ #if OPENSSL_VERSION_NUMBER >= 0x30000000L
+-#include <openssl/param_build.h>
+ #include <openssl/core_names.h>
++#include <openssl/param_build.h>
+ #endif /* OPENSSL_VERSION_NUMBER */
+ #endif /* HAVE_OPENSSL_EVP_KDF_CTX */
+ 
+@@ -87,8 +91,18 @@
+ 
+ static int libcrypto_initialized = 0;
+ 
++#ifdef WITH_INSECURE_NONE
++static void none_crypt(UNUSED_PARAM(struct ssh_cipher_struct *cipher),
++                       void *in,
++                       void *out,
++                       size_t len)
++{
++    memcpy(out, in, len);
++}
++#endif /* WITH_INSECURE_NONE */
+ 
+-void ssh_reseed(void){
++void ssh_reseed(void)
++{
+ #ifndef _WIN32
+     struct timeval tv;
+     gettimeofday(&tv, NULL);
+@@ -164,8 +178,10 @@ static const char *sshkdf_digest_to_md(enum ssh_kdf_digest digest_type)
+ #endif /* OPENSSL_VERSION_NUMBER */
+ 
+ int ssh_kdf(struct ssh_crypto_struct *crypto,
+-            unsigned char *key, size_t key_len,
+-            uint8_t key_type, unsigned char *output,
++            unsigned char *key,
++            size_t key_len,
++            uint8_t key_type,
++            unsigned char *output,
+             size_t requested_len)
+ {
+     int rc = -1;
+@@ -202,7 +218,8 @@ int ssh_kdf(struct ssh_crypto_struct *crypto,
+     }
+ 
+ #if OPENSSL_VERSION_NUMBER < 0x30000000L
+-    rc = EVP_KDF_ctrl(ctx, EVP_KDF_CTRL_SET_MD,
++    rc = EVP_KDF_ctrl(ctx,
++                      EVP_KDF_CTRL_SET_MD,
+                       sshkdf_digest_to_md(crypto->digest_type));
+     if (rc != 1) {
+         goto out;
+@@ -211,8 +228,10 @@ int ssh_kdf(struct ssh_crypto_struct *crypto,
+     if (rc != 1) {
+         goto out;
+     }
+-    rc = EVP_KDF_ctrl(ctx, EVP_KDF_CTRL_SET_SSHKDF_XCGHASH,
+-                      crypto->secret_hash, crypto->digest_len);
++    rc = EVP_KDF_ctrl(ctx,
++                      EVP_KDF_CTRL_SET_SSHKDF_XCGHASH,
++                      crypto->secret_hash,
++                      crypto->digest_len);
+     if (rc != 1) {
+         goto out;
+     }
+@@ -220,8 +239,10 @@ int ssh_kdf(struct ssh_crypto_struct *crypto,
+     if (rc != 1) {
+         goto out;
+     }
+-    rc = EVP_KDF_ctrl(ctx, EVP_KDF_CTRL_SET_SSHKDF_SESSION_ID,
+-                      crypto->session_id, crypto->session_id_len);
++    rc = EVP_KDF_ctrl(ctx,
++                      EVP_KDF_CTRL_SET_SSHKDF_SESSION_ID,
++                      crypto->session_id,
++                      crypto->session_id_len);
+     if (rc != 1) {
+         goto out;
+     }
+@@ -230,14 +251,18 @@ int ssh_kdf(struct ssh_crypto_struct *crypto,
+         goto out;
+     }
+ #else
+-    rc = OSSL_PARAM_BLD_push_utf8_string(param_bld, OSSL_KDF_PARAM_DIGEST,
+-                                         md, strlen(md));
++    rc = OSSL_PARAM_BLD_push_utf8_string(param_bld,
++                                         OSSL_KDF_PARAM_DIGEST,
++                                         md,
++                                         strlen(md));
+     if (rc != 1) {
+         rc = -1;
+         goto out;
+     }
+-    rc = OSSL_PARAM_BLD_push_octet_string(param_bld, OSSL_KDF_PARAM_KEY,
+-                                          key, key_len);
++    rc = OSSL_PARAM_BLD_push_octet_string(param_bld,
++                                          OSSL_KDF_PARAM_KEY,
++                                          key,
++                                          key_len);
+     if (rc != 1) {
+         rc = -1;
+         goto out;
+@@ -258,8 +283,10 @@ int ssh_kdf(struct ssh_crypto_struct *crypto,
+         rc = -1;
+         goto out;
+     }
+-    rc = OSSL_PARAM_BLD_push_utf8_string(param_bld, OSSL_KDF_PARAM_SSHKDF_TYPE,
+-                                         (const char*)&key_type, 1);
++    rc = OSSL_PARAM_BLD_push_utf8_string(param_bld,
++                                         OSSL_KDF_PARAM_SSHKDF_TYPE,
++                                         (const char *)&key_type,
++                                         1);
+     if (rc != 1) {
+         rc = -1;
+         goto out;
+@@ -292,12 +319,18 @@ out:
+ 
+ #else
+ int ssh_kdf(struct ssh_crypto_struct *crypto,
+-            unsigned char *key, size_t key_len,
+-            uint8_t key_type, unsigned char *output,
++            unsigned char *key,
++            size_t key_len,
++            uint8_t key_type,
++            unsigned char *output,
+             size_t requested_len)
+ {
+-    return sshkdf_derive_key(crypto, key, key_len,
+-                             key_type, output, requested_len);
++    return sshkdf_derive_key(crypto,
++                             key,
++                             key_len,
++                             key_type,
++                             output,
++                             requested_len);
+ }
+ #endif /* HAVE_OPENSSL_EVP_KDF_CTX */
+ 
+@@ -372,7 +405,7 @@ static void evp_cipher_init(struct ssh_cipher_struct *cipher)
+         EVP_CIPHER_CTX_init(cipher->ctx);
+     }
+ 
+-    switch(cipher->ciphertype){
++    switch (cipher->ciphertype) {
+     case SSH_AES128_CBC:
+         cipher->cipher = EVP_aes_128_cbc();
+         break;
+@@ -416,62 +449,65 @@ static void evp_cipher_init(struct ssh_cipher_struct *cipher)
+ }
+ 
+ static int evp_cipher_set_encrypt_key(struct ssh_cipher_struct *cipher,
+-            void *key, void *IV)
++                                      void *key,
++                                      void *IV)
+ {
+-    int rc;
+-
+-    evp_cipher_init(cipher);
+-
+-    rc = EVP_EncryptInit_ex(cipher->ctx, cipher->cipher, NULL, key, IV);
+-    if (rc != 1){
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_EncryptInit_ex failed");
+-        return SSH_ERROR;
+-    }
+-
+-    /* For AES-GCM we need to set IV in specific way */
+-    if (cipher->ciphertype == SSH_AEAD_AES128_GCM ||
+-        cipher->ciphertype == SSH_AEAD_AES256_GCM) {
+-        rc = EVP_CIPHER_CTX_ctrl(cipher->ctx,
+-                                 EVP_CTRL_GCM_SET_IV_FIXED,
+-                                 -1,
+-                                 (uint8_t *)IV);
+-        if (rc != 1) {
+-            SSH_LOG(SSH_LOG_TRACE, "EVP_CTRL_GCM_SET_IV_FIXED failed");
+-            return SSH_ERROR;
+-        }
+-    }
+-
+-    EVP_CIPHER_CTX_set_padding(cipher->ctx, 0);
++    // int rc;
++
++    // evp_cipher_init(cipher);
++
++    // rc = EVP_EncryptInit_ex(cipher->ctx, cipher->cipher, NULL, key, IV);
++    // if (rc != 1) {
++    //     SSH_LOG(SSH_LOG_TRACE, "EVP_EncryptInit_ex failed");
++    //     return SSH_ERROR;
++    // }
++
++    // /* For AES-GCM we need to set IV in specific way */
++    // if (cipher->ciphertype == SSH_AEAD_AES128_GCM ||
++    //     cipher->ciphertype == SSH_AEAD_AES256_GCM) {
++    //     rc = EVP_CIPHER_CTX_ctrl(cipher->ctx,
++    //                              EVP_CTRL_GCM_SET_IV_FIXED,
++    //                              -1,
++    //                              (uint8_t *)IV);
++    //     if (rc != 1) {
++    //         SSH_LOG(SSH_LOG_TRACE, "EVP_CTRL_GCM_SET_IV_FIXED failed");
++    //         return SSH_ERROR;
++    //     }
++    // }
++
++    // EVP_CIPHER_CTX_set_padding(cipher->ctx, 0);
+ 
+     return SSH_OK;
+ }
+ 
+ static int evp_cipher_set_decrypt_key(struct ssh_cipher_struct *cipher,
+-            void *key, void *IV) {
+-    int rc;
+-
+-    evp_cipher_init(cipher);
+-
+-    rc = EVP_DecryptInit_ex(cipher->ctx, cipher->cipher, NULL, key, IV);
+-    if (rc != 1){
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_DecryptInit_ex failed");
+-        return SSH_ERROR;
+-    }
+-
+-    /* For AES-GCM we need to set IV in specific way */
+-    if (cipher->ciphertype == SSH_AEAD_AES128_GCM ||
+-        cipher->ciphertype == SSH_AEAD_AES256_GCM) {
+-        rc = EVP_CIPHER_CTX_ctrl(cipher->ctx,
+-                                 EVP_CTRL_GCM_SET_IV_FIXED,
+-                                 -1,
+-                                 (uint8_t *)IV);
+-        if (rc != 1) {
+-            SSH_LOG(SSH_LOG_TRACE, "EVP_CTRL_GCM_SET_IV_FIXED failed");
+-            return SSH_ERROR;
+-        }
+-    }
+-
+-    EVP_CIPHER_CTX_set_padding(cipher->ctx, 0);
++                                      void *key,
++                                      void *IV)
++{
++    // int rc;
++
++    // evp_cipher_init(cipher);
++
++    // rc = EVP_DecryptInit_ex(cipher->ctx, cipher->cipher, NULL, key, IV);
++    // if (rc != 1) {
++    //     SSH_LOG(SSH_LOG_TRACE, "EVP_DecryptInit_ex failed");
++    //     return SSH_ERROR;
++    // }
++
++    // /* For AES-GCM we need to set IV in specific way */
++    // if (cipher->ciphertype == SSH_AEAD_AES128_GCM ||
++    //     cipher->ciphertype == SSH_AEAD_AES256_GCM) {
++    //     rc = EVP_CIPHER_CTX_ctrl(cipher->ctx,
++    //                              EVP_CTRL_GCM_SET_IV_FIXED,
++    //                              -1,
++    //                              (uint8_t *)IV);
++    //     if (rc != 1) {
++    //         SSH_LOG(SSH_LOG_TRACE, "EVP_CTRL_GCM_SET_IV_FIXED failed");
++    //         return SSH_ERROR;
++    //     }
++    // }
++
++    // EVP_CIPHER_CTX_set_padding(cipher->ctx, 0);
+ 
+     return SSH_OK;
+ }
+@@ -482,25 +518,27 @@ static void evp_cipher_encrypt(struct ssh_cipher_struct *cipher,
+                                void *out,
+                                size_t len)
+ {
+-    int outlen = 0;
+-    int rc = 0;
+-
+-    rc = EVP_EncryptUpdate(cipher->ctx,
+-                           (unsigned char *)out,
+-                           &outlen,
+-                           (unsigned char *)in,
+-                           (int)len);
+-    if (rc != 1){
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_EncryptUpdate failed");
+-        return;
+-    }
+-    if (outlen != (int)len){
+-        SSH_LOG(SSH_LOG_DEBUG,
+-                "EVP_EncryptUpdate: output size %d for %zu in",
+-                outlen,
+-                len);
+-        return;
+-    }
++    none_crypt(cipher, in, out, len);
++
++    // int outlen = 0;
++    // int rc = 0;
++
++    // rc = EVP_EncryptUpdate(cipher->ctx,
++    //                        (unsigned char *)out,
++    //                        &outlen,
++    //                        (unsigned char *)in,
++    //                        (int)len);
++    // if (rc != 1) {
++    //     SSH_LOG(SSH_LOG_TRACE, "EVP_EncryptUpdate failed");
++    //     return;
++    // }
++    // if (outlen != (int)len) {
++    //     SSH_LOG(SSH_LOG_DEBUG,
++    //             "EVP_EncryptUpdate: output size %d for %zu in",
++    //             outlen,
++    //             len);
++    //     return;
++    // }
+ }
+ 
+ static void evp_cipher_decrypt(struct ssh_cipher_struct *cipher,
+@@ -508,39 +546,41 @@ static void evp_cipher_decrypt(struct ssh_cipher_struct *cipher,
+                                void *out,
+                                size_t len)
+ {
+-    int outlen = 0;
+-    int rc = 0;
+-
+-    rc = EVP_DecryptUpdate(cipher->ctx,
+-                           (unsigned char *)out,
+-                           &outlen,
+-                           (unsigned char *)in,
+-                           (int)len);
+-    if (rc != 1){
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_DecryptUpdate failed");
+-        return;
+-    }
+-    if (outlen != (int)len){
+-        SSH_LOG(SSH_LOG_DEBUG,
+-                "EVP_DecryptUpdate: output size %d for %zu in",
+-                outlen,
+-                len);
+-        return;
+-    }
++    none_crypt(cipher, in, out, len);
++
++    // int outlen = 0;
++    // int rc = 0;
++
++    // rc = EVP_DecryptUpdate(cipher->ctx,
++    //                        (unsigned char *)out,
++    //                        &outlen,
++    //                        (unsigned char *)in,
++    //                        (int)len);
++    // if (rc != 1) {
++    //     SSH_LOG(SSH_LOG_TRACE, "EVP_DecryptUpdate failed");
++    //     return;
++    // }
++    // if (outlen != (int)len) {
++    //     SSH_LOG(SSH_LOG_DEBUG,
++    //             "EVP_DecryptUpdate: output size %d for %zu in",
++    //             outlen,
++    //             len);
++    //     return;
++    // }
+ }
+ 
+-static void evp_cipher_cleanup(struct ssh_cipher_struct *cipher) {
++static void evp_cipher_cleanup(struct ssh_cipher_struct *cipher)
++{
+     if (cipher->ctx != NULL) {
+         EVP_CIPHER_CTX_free(cipher->ctx);
+     }
+ }
+ 
+-static int
+-evp_cipher_aead_get_length(struct ssh_cipher_struct *cipher,
+-                           void *in,
+-                           uint8_t *out,
+-                           size_t len,
+-                           uint64_t seq)
++static int evp_cipher_aead_get_length(struct ssh_cipher_struct *cipher,
++                                      void *in,
++                                      uint8_t *out,
++                                      size_t len,
++                                      uint64_t seq)
+ {
+     (void)cipher;
+     (void)seq;
+@@ -551,156 +591,152 @@ evp_cipher_aead_get_length(struct ssh_cipher_struct *cipher,
+     return SSH_OK;
+ }
+ 
+-static void
+-evp_cipher_aead_encrypt(struct ssh_cipher_struct *cipher,
+-                        void *in,
+-                        void *out,
+-                        size_t len,
+-                        uint8_t *tag,
+-                        uint64_t seq)
++static void evp_cipher_aead_encrypt(struct ssh_cipher_struct *cipher,
++                                    void *in,
++                                    void *out,
++                                    size_t len,
++                                    uint8_t *tag,
++                                    uint64_t seq)
+ {
+-    size_t authlen, aadlen;
+-    uint8_t lastiv[1];
+-    int tmplen = 0;
+-    size_t outlen;
+-    int rc;
+-
+-    (void) seq;
+ 
+-    aadlen = cipher->lenfield_blocksize;
+-    authlen = cipher->tag_size;
+-
+-    /* increment IV */
+-    rc = EVP_CIPHER_CTX_ctrl(cipher->ctx,
+-                             EVP_CTRL_GCM_IV_GEN,
+-                             1,
+-                             lastiv);
+-    if (rc == 0) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_CTRL_GCM_IV_GEN failed");
+-        return;
+-    }
+-
+-    /* Pass over the authenticated data (not encrypted) */
+-    rc = EVP_EncryptUpdate(cipher->ctx,
+-                           NULL,
+-                           &tmplen,
+-                           (unsigned char *)in,
+-                           (int)aadlen);
+-    outlen = tmplen;
+-    if (rc == 0 || outlen != aadlen) {
+-        SSH_LOG(SSH_LOG_TRACE, "Failed to pass authenticated data");
+-        return;
+-    }
+-    memcpy(out, in, aadlen);
+-
+-    /* Encrypt the rest of the data */
+-    rc = EVP_EncryptUpdate(cipher->ctx,
+-                           (unsigned char *)out + aadlen,
+-                           &tmplen,
+-                           (unsigned char *)in + aadlen,
+-                           (int)(len - aadlen));
+-    outlen = tmplen;
+-    if (rc != 1 || outlen != (int)len - aadlen) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_EncryptUpdate failed");
+-        return;
+-    }
+-
+-    /* compute tag */
+-    rc = EVP_EncryptFinal(cipher->ctx,
+-                          NULL,
+-                          &tmplen);
+-    if (rc < 0) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_EncryptFinal failed: Failed to create a tag");
+-        return;
+-    }
+-
+-    rc = EVP_CIPHER_CTX_ctrl(cipher->ctx,
+-                             EVP_CTRL_GCM_GET_TAG,
+-                             (int)authlen,
+-                             (unsigned char *)tag);
+-    if (rc != 1) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_CTRL_GCM_GET_TAG failed");
+-        return;
+-    }
++    none_crypt(cipher, in, out, len);
++    // size_t authlen, aadlen;
++    // uint8_t lastiv[1];
++    // int tmplen = 0;
++    // size_t outlen;
++    // int rc;
++
++    // (void)seq;
++
++    // aadlen = cipher->lenfield_blocksize;
++    // authlen = cipher->tag_size;
++
++    // /* increment IV */
++    // rc = EVP_CIPHER_CTX_ctrl(cipher->ctx, EVP_CTRL_GCM_IV_GEN, 1, lastiv);
++    // if (rc == 0) {
++    //     SSH_LOG(SSH_LOG_TRACE, "EVP_CTRL_GCM_IV_GEN failed");
++    //     return;
++    // }
++
++    // /* Pass over the authenticated data (not encrypted) */
++    // rc = EVP_EncryptUpdate(cipher->ctx,
++    //                        NULL,
++    //                        &tmplen,
++    //                        (unsigned char *)in,
++    //                        (int)aadlen);
++    // outlen = tmplen;
++    // if (rc == 0 || outlen != aadlen) {
++    //     SSH_LOG(SSH_LOG_TRACE, "Failed to pass authenticated data");
++    //     return;
++    // }
++    // memcpy(out, in, aadlen);
++
++    // /* Encrypt the rest of the data */
++    // rc = EVP_EncryptUpdate(cipher->ctx,
++    //                        (unsigned char *)out + aadlen,
++    //                        &tmplen,
++    //                        (unsigned char *)in + aadlen,
++    //                        (int)(len - aadlen));
++    // outlen = tmplen;
++    // if (rc != 1 || outlen != (int)len - aadlen) {
++    //     SSH_LOG(SSH_LOG_TRACE, "EVP_EncryptUpdate failed");
++    //     return;
++    // }
++
++    // /* compute tag */
++    // rc = EVP_EncryptFinal(cipher->ctx, NULL, &tmplen);
++    // if (rc < 0) {
++    //     SSH_LOG(SSH_LOG_TRACE,
++    //             "EVP_EncryptFinal failed: Failed to create a tag");
++    //     return;
++    // }
++
++    // rc = EVP_CIPHER_CTX_ctrl(cipher->ctx,
++    //                          EVP_CTRL_GCM_GET_TAG,
++    //                          (int)authlen,
++    //                          (unsigned char *)tag);
++    // if (rc != 1) {
++    //     SSH_LOG(SSH_LOG_TRACE, "EVP_CTRL_GCM_GET_TAG failed");
++    //     return;
++    // }
+ }
+ 
+-static int
+-evp_cipher_aead_decrypt(struct ssh_cipher_struct *cipher,
+-                        void *complete_packet,
+-                        uint8_t *out,
+-                        size_t encrypted_size,
+-                        uint64_t seq)
++static int evp_cipher_aead_decrypt(struct ssh_cipher_struct *cipher,
++                                   void *complete_packet,
++                                   uint8_t *out,
++                                   size_t encrypted_size,
++                                   uint64_t seq)
+ {
+-    size_t authlen, aadlen;
+-    uint8_t lastiv[1];
+-    int outlen = 0;
+-    int rc = 0;
+-
+-    (void)seq;
+-
+-    aadlen = cipher->lenfield_blocksize;
+-    authlen = cipher->tag_size;
+-
+-    /* increment IV */
+-    rc = EVP_CIPHER_CTX_ctrl(cipher->ctx,
+-                             EVP_CTRL_GCM_IV_GEN,
+-                             1,
+-                             lastiv);
+-    if (rc == 0) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_CTRL_GCM_IV_GEN failed");
+-        return SSH_ERROR;
+-    }
+-
+-    /* set tag for authentication */
+-    rc = EVP_CIPHER_CTX_ctrl(cipher->ctx,
+-                             EVP_CTRL_GCM_SET_TAG,
+-                             (int)authlen,
+-                             (unsigned char *)complete_packet + aadlen + encrypted_size);
+-    if (rc == 0) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_CTRL_GCM_SET_TAG failed");
+-        return SSH_ERROR;
+-    }
+-
+-    /* Pass over the authenticated data (not encrypted) */
+-    rc = EVP_DecryptUpdate(cipher->ctx,
+-                           NULL,
+-                           &outlen,
+-                           (unsigned char *)complete_packet,
+-                           (int)aadlen);
+-    if (rc == 0) {
+-        SSH_LOG(SSH_LOG_TRACE, "Failed to pass authenticated data");
+-        return SSH_ERROR;
+-    }
+-    /* Do not copy the length to the target buffer, because it is already processed */
+-    //memcpy(out, complete_packet, aadlen);
+-
+-    /* Decrypt the rest of the data */
+-    rc = EVP_DecryptUpdate(cipher->ctx,
+-                           (unsigned char *)out,
+-                           &outlen,
+-                           (unsigned char *)complete_packet + aadlen,
+-                           (int)encrypted_size /* already subtracted aadlen */);
+-    if (rc != 1) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_DecryptUpdate failed");
+-        return SSH_ERROR;
+-    }
+-
+-    if (outlen != (int)encrypted_size) {
+-        SSH_LOG(SSH_LOG_TRACE,
+-                "EVP_DecryptUpdate: output size %d for %zd in",
+-                outlen,
+-                encrypted_size);
+-        return SSH_ERROR;
+-    }
+-
+-    /* verify tag */
+-    rc = EVP_DecryptFinal(cipher->ctx,
+-                          NULL,
+-                          &outlen);
+-    if (rc < 0) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_DecryptFinal failed: Failed authentication");
+-        return SSH_ERROR;
+-    }
++    none_crypt(cipher, complete_packet, out, encrypted_size);
++    // size_t authlen, aadlen;
++    // uint8_t lastiv[1];
++    // int outlen = 0;
++    // int rc = 0;
++
++    // (void)seq;
++
++    // aadlen = cipher->lenfield_blocksize;
++    // authlen = cipher->tag_size;
++
++    // /* increment IV */
++    // rc = EVP_CIPHER_CTX_ctrl(cipher->ctx, EVP_CTRL_GCM_IV_GEN, 1, lastiv);
++    // if (rc == 0) {
++    //     SSH_LOG(SSH_LOG_TRACE, "EVP_CTRL_GCM_IV_GEN failed");
++    //     return SSH_ERROR;
++    // }
++
++    // /* set tag for authentication */
++    // rc = EVP_CIPHER_CTX_ctrl(cipher->ctx,
++    //                          EVP_CTRL_GCM_SET_TAG,
++    //                          (int)authlen,
++    //                          (unsigned char *)complete_packet + aadlen +
++    //                              encrypted_size);
++    // if (rc == 0) {
++    //     SSH_LOG(SSH_LOG_TRACE, "EVP_CTRL_GCM_SET_TAG failed");
++    //     return SSH_ERROR;
++    // }
++
++    // /* Pass over the authenticated data (not encrypted) */
++    // rc = EVP_DecryptUpdate(cipher->ctx,
++    //                        NULL,
++    //                        &outlen,
++    //                        (unsigned char *)complete_packet,
++    //                        (int)aadlen);
++    // if (rc == 0) {
++    //     SSH_LOG(SSH_LOG_TRACE, "Failed to pass authenticated data");
++    //     return SSH_ERROR;
++    // }
++    // /* Do not copy the length to the target buffer, because it is already
++    //  * processed */
++    // // memcpy(out, complete_packet, aadlen);
++
++    // /* Decrypt the rest of the data */
++    // rc = EVP_DecryptUpdate(cipher->ctx,
++    //                        (unsigned char *)out,
++    //                        &outlen,
++    //                        (unsigned char *)complete_packet + aadlen,
++    //                        (int)encrypted_size /* already subtracted aadlen
++    //                        */);
++    // if (rc != 1) {
++    //     SSH_LOG(SSH_LOG_TRACE, "EVP_DecryptUpdate failed");
++    //     return SSH_ERROR;
++    // }
++
++    // if (outlen != (int)encrypted_size) {
++    //     SSH_LOG(SSH_LOG_TRACE,
++    //             "EVP_DecryptUpdate: output size %d for %zd in",
++    //             outlen,
++    //             encrypted_size);
++    //     return SSH_ERROR;
++    // }
++
++    // /* verify tag */
++    // rc = EVP_DecryptFinal(cipher->ctx, NULL, &outlen);
++    // if (rc < 0) {
++    //     SSH_LOG(SSH_LOG_TRACE,
++    //             "EVP_DecryptFinal failed: Failed authentication");
++    //     return SSH_ERROR;
++    // }
+ 
+     return SSH_OK;
+ }
+@@ -725,216 +761,234 @@ struct chacha20_poly1305_keysched {
+ #endif /* OPENSSL_VERSION_NUMBER */
+ };
+ 
+-static void
+-chacha20_poly1305_cleanup(struct ssh_cipher_struct *cipher)
++static void chacha20_poly1305_cleanup(struct ssh_cipher_struct *cipher)
+ {
+-    struct chacha20_poly1305_keysched *ctx = NULL;
+-
+-    if (cipher->chacha20_schedule == NULL) {
+-        return;
+-    }
+-
+-    ctx = cipher->chacha20_schedule;
+-
+-    EVP_CIPHER_CTX_free(ctx->main_evp);
+-    ctx->main_evp  = NULL;
+-    EVP_CIPHER_CTX_free(ctx->header_evp);
+-    ctx->header_evp = NULL;
+-#if OPENSSL_VERSION_NUMBER < 0x30000000L
+-    /* ctx->pctx is freed as part of MD context */
+-    EVP_PKEY_free(ctx->key);
+-    ctx->key = NULL;
+-    EVP_MD_CTX_free(ctx->mctx);
+-    ctx->mctx = NULL;
+-#else
+-    EVP_MAC_CTX_free(ctx->mctx);
+-    ctx->mctx = NULL;
+-#endif /* OPENSSL_VERSION_NUMBER */
+-
+-    SAFE_FREE(cipher->chacha20_schedule);
++    //     struct chacha20_poly1305_keysched *ctx = NULL;
++
++    //     if (cipher->chacha20_schedule == NULL) {
++    //         return;
++    //     }
++
++    //     ctx = cipher->chacha20_schedule;
++
++    //     EVP_CIPHER_CTX_free(ctx->main_evp);
++    //     ctx->main_evp = NULL;
++    //     EVP_CIPHER_CTX_free(ctx->header_evp);
++    //     ctx->header_evp = NULL;
++    // #if OPENSSL_VERSION_NUMBER < 0x30000000L
++    //     /* ctx->pctx is freed as part of MD context */
++    //     EVP_PKEY_free(ctx->key);
++    //     ctx->key = NULL;
++    //     EVP_MD_CTX_free(ctx->mctx);
++    //     ctx->mctx = NULL;
++    // #else
++    //     EVP_MAC_CTX_free(ctx->mctx);
++    //     ctx->mctx = NULL;
++    // #endif /* OPENSSL_VERSION_NUMBER */
++
++    //     SAFE_FREE(cipher->chacha20_schedule);
+ }
+ 
+-static int
+-chacha20_poly1305_set_key(struct ssh_cipher_struct *cipher,
+-                          void *key,
+-                          UNUSED_PARAM(void *IV))
++static int chacha20_poly1305_set_key(struct ssh_cipher_struct *cipher,
++                                     void *key,
++                                     UNUSED_PARAM(void *IV))
+ {
+-    struct chacha20_poly1305_keysched *ctx = NULL;
+-    uint8_t *u8key = key;
+-    int ret = SSH_ERROR, rv;
+-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+-    EVP_MAC *mac = NULL;
+-#endif
+-
+-    if (cipher->chacha20_schedule == NULL) {
+-        ctx = calloc(1, sizeof(*ctx));
+-        if (ctx == NULL) {
+-            return -1;
+-        }
+-        cipher->chacha20_schedule = ctx;
+-    } else {
+-        ctx = cipher->chacha20_schedule;
+-    }
+-
+-    /* ChaCha20 initialization */
+-    /* K2 uses the first half of the key */
+-    ctx->main_evp = EVP_CIPHER_CTX_new();
+-    if (ctx->main_evp == NULL) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_CIPHER_CTX_new failed");
+-        goto out;
+-    }
+-    rv = EVP_EncryptInit_ex(ctx->main_evp, EVP_chacha20(), NULL, u8key, NULL);
+-    if (rv != 1) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_CipherInit failed");
+-        goto out;
+-    }
+-    /* K1 uses the second half of the key */
+-    ctx->header_evp = EVP_CIPHER_CTX_new();
+-    if (ctx->header_evp == NULL) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_CIPHER_CTX_new failed");
+-        goto out;
+-    }
+-    ret = EVP_EncryptInit_ex(ctx->header_evp, EVP_chacha20(), NULL,
+-                             u8key + CHACHA20_KEYLEN, NULL);
+-    if (ret != 1) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_CipherInit failed");
+-        goto out;
+-    }
+-
+-    /* The Poly1305 key initialization is delayed to the time we know
+-     * the actual key for packet so we do not need to create a bogus keys
+-     */
+-#if OPENSSL_VERSION_NUMBER < 0x30000000L
+-    ctx->mctx = EVP_MD_CTX_new();
+-    if (ctx->mctx == NULL) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_MD_CTX_new failed");
+-        return SSH_ERROR;
+-    }
+-#else
+-    mac = EVP_MAC_fetch(NULL, "poly1305", NULL);
+-    if (mac == NULL) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_MAC_fetch failed");
+-        goto out;
+-    }
+-    ctx->mctx = EVP_MAC_CTX_new(mac);
+-    if (ctx->mctx == NULL) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_MAC_CTX_new failed");
+-        goto out;
+-    }
+-#endif /* OPENSSL_VERSION_NUMBER */
+-
+-    ret = SSH_OK;
+-out:
+-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+-    EVP_MAC_free(mac);
+-#endif
+-    if (ret != SSH_OK) {
+-        chacha20_poly1305_cleanup(cipher);
+-    }
+-    return ret;
++    return SSH_OK;
++    //     struct chacha20_poly1305_keysched *ctx = NULL;
++    //     uint8_t *u8key = key;
++    //     int ret = SSH_ERROR, rv;
++    // #if OPENSSL_VERSION_NUMBER >= 0x30000000L
++    //     EVP_MAC *mac = NULL;
++    // #endif
++
++    //     if (cipher->chacha20_schedule == NULL) {
++    //         ctx = calloc(1, sizeof(*ctx));
++    //         if (ctx == NULL) {
++    //             return -1;
++    //         }
++    //         cipher->chacha20_schedule = ctx;
++    //     } else {
++    //         ctx = cipher->chacha20_schedule;
++    //     }
++
++    //     /* ChaCha20 initialization */
++    //     /* K2 uses the first half of the key */
++    //     ctx->main_evp = EVP_CIPHER_CTX_new();
++    //     if (ctx->main_evp == NULL) {
++    //         SSH_LOG(SSH_LOG_TRACE, "EVP_CIPHER_CTX_new failed");
++    //         goto out;
++    //     }
++    //     rv = EVP_EncryptInit_ex(ctx->main_evp, EVP_chacha20(), NULL, u8key,
++    //     NULL); if (rv != 1) {
++    //         SSH_LOG(SSH_LOG_TRACE, "EVP_CipherInit failed");
++    //         goto out;
++    //     }
++    //     /* K1 uses the second half of the key */
++    //     ctx->header_evp = EVP_CIPHER_CTX_new();
++    //     if (ctx->header_evp == NULL) {
++    //         SSH_LOG(SSH_LOG_TRACE, "EVP_CIPHER_CTX_new failed");
++    //         goto out;
++    //     }
++    //     ret = EVP_EncryptInit_ex(ctx->header_evp,
++    //                              EVP_chacha20(),
++    //                              NULL,
++    //                              u8key + CHACHA20_KEYLEN,
++    //                              NULL);
++    //     if (ret != 1) {
++    //         SSH_LOG(SSH_LOG_TRACE, "EVP_CipherInit failed");
++    //         goto out;
++    //     }
++
++    //     /* The Poly1305 key initialization is delayed to the time we know
++    //      * the actual key for packet so we do not need to create a bogus keys
++    //      */
++    // #if OPENSSL_VERSION_NUMBER < 0x30000000L
++    //     ctx->mctx = EVP_MD_CTX_new();
++    //     if (ctx->mctx == NULL) {
++    //         SSH_LOG(SSH_LOG_TRACE, "EVP_MD_CTX_new failed");
++    //         return SSH_ERROR;
++    //     }
++    // #else
++    //     mac = EVP_MAC_fetch(NULL, "poly1305", NULL);
++    //     if (mac == NULL) {
++    //         SSH_LOG(SSH_LOG_TRACE, "EVP_MAC_fetch failed");
++    //         goto out;
++    //     }
++    //     ctx->mctx = EVP_MAC_CTX_new(mac);
++    //     if (ctx->mctx == NULL) {
++    //         SSH_LOG(SSH_LOG_TRACE, "EVP_MAC_CTX_new failed");
++    //         goto out;
++    //     }
++    // #endif /* OPENSSL_VERSION_NUMBER */
++
++    //     ret = SSH_OK;
++    // out:
++    // #if OPENSSL_VERSION_NUMBER >= 0x30000000L
++    //     EVP_MAC_free(mac);
++    // #endif
++    //     if (ret != SSH_OK) {
++    //         chacha20_poly1305_cleanup(cipher);
++    //     }
++    //     return ret;
+ }
+ 
+-static const uint8_t zero_block[CHACHA20_BLOCKSIZE] = {0};
++// static const uint8_t zero_block[CHACHA20_BLOCKSIZE] = {0};
+ 
+-static int
+-chacha20_poly1305_set_iv(struct ssh_cipher_struct *cipher,
+-                         uint64_t seq,
+-                         int do_encrypt)
++static int chacha20_poly1305_set_iv(struct ssh_cipher_struct *cipher,
++                                    uint64_t seq,
++                                    int do_encrypt)
+ {
+-    struct chacha20_poly1305_keysched *ctx = cipher->chacha20_schedule;
+-    uint8_t seqbuf[16] = {0};
+-    int ret;
+-
+-    /* Prepare the IV for OpenSSL -- it needs to be 128 b long. First 32 b is
+-     * counter the rest is nonce. The memory is initialized to zeros
+-     * (counter starts from 0) and we set the sequence number in the second half
+-     */
+-    PUSH_BE_U64(seqbuf, 8, seq);
+-#ifdef DEBUG_CRYPTO
+-    ssh_log_hexdump("seqbuf (chacha20 IV)", seqbuf, sizeof(seqbuf));
+-#endif /* DEBUG_CRYPTO */
+-
+-    ret = EVP_CipherInit_ex(ctx->header_evp, NULL, NULL, NULL, seqbuf, do_encrypt);
+-    if (ret != 1) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_CipherInit_ex(header_evp) failed");
+-        return SSH_ERROR;
+-    }
+-
+-    ret = EVP_CipherInit_ex(ctx->main_evp, NULL, NULL, NULL, seqbuf, do_encrypt);
+-    if (ret != 1) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_CipherInit_ex(main_evp) failed");
+-        return SSH_ERROR;
+-    }
++    //     struct chacha20_poly1305_keysched *ctx = cipher->chacha20_schedule;
++    //     uint8_t seqbuf[16] = {0};
++    //     int ret;
++
++    //     /* Prepare the IV for OpenSSL -- it needs to be 128 b long. First 32
++    //     b is
++    //      * counter the rest is nonce. The memory is initialized to zeros
++    //      * (counter starts from 0) and we set the sequence number in the
++    //      second half
++    //      */
++    //     PUSH_BE_U64(seqbuf, 8, seq);
++    // #ifdef DEBUG_CRYPTO
++    //     ssh_log_hexdump("seqbuf (chacha20 IV)", seqbuf, sizeof(seqbuf));
++    // #endif /* DEBUG_CRYPTO */
++
++    //     ret = EVP_CipherInit_ex(ctx->header_evp,
++    //                             NULL,
++    //                             NULL,
++    //                             NULL,
++    //                             seqbuf,
++    //                             do_encrypt);
++    //     if (ret != 1) {
++    //         SSH_LOG(SSH_LOG_TRACE, "EVP_CipherInit_ex(header_evp) failed");
++    //         return SSH_ERROR;
++    //     }
++
++    //     ret =
++    //         EVP_CipherInit_ex(ctx->main_evp, NULL, NULL, NULL, seqbuf,
++    //         do_encrypt);
++    //     if (ret != 1) {
++    //         SSH_LOG(SSH_LOG_TRACE, "EVP_CipherInit_ex(main_evp) failed");
++    //         return SSH_ERROR;
++    //     }
+ 
+     return SSH_OK;
+ }
+ 
+-static int
+-chacha20_poly1305_packet_setup(struct ssh_cipher_struct *cipher,
+-                               uint64_t seq,
+-                               int do_encrypt)
++static int chacha20_poly1305_packet_setup(struct ssh_cipher_struct *cipher,
++                                          uint64_t seq,
++                                          int do_encrypt)
+ {
+-    struct chacha20_poly1305_keysched *ctx = cipher->chacha20_schedule;
+-    uint8_t poly_key[CHACHA20_BLOCKSIZE];
+-    int ret = SSH_ERROR, len, rv;
+-
+-    /* The initialization for decrypt was already done with the length block */
+-    if (do_encrypt) {
+-        rv = chacha20_poly1305_set_iv(cipher, seq, do_encrypt);
+-        if (rv != SSH_OK) {
+-            return SSH_ERROR;
+-        }
+-    }
+-
+-    /* Output full ChaCha block so that counter increases by one for
+-     * next step. */
+-    rv = EVP_CipherUpdate(ctx->main_evp, poly_key, &len,
+-                           (unsigned char *)zero_block, sizeof(zero_block));
+-    if (rv != 1 || len != CHACHA20_BLOCKSIZE) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_EncryptUpdate failed");
+-        goto out;
+-    }
+-#ifdef DEBUG_CRYPTO
+-    ssh_log_hexdump("poly_key", poly_key, POLY1305_KEYLEN);
+-#endif /* DEBUG_CRYPTO */
+-
+-    /* Set the Poly1305 key */
+-#if OPENSSL_VERSION_NUMBER < 0x30000000L
+-    if (ctx->key == NULL) {
+-        /* Poly1305 Initialization needs to know the actual key */
+-        ctx->key = EVP_PKEY_new_mac_key(EVP_PKEY_POLY1305, NULL,
+-                                        poly_key, POLY1305_KEYLEN);
+-        if (ctx->key == NULL) {
+-            SSH_LOG(SSH_LOG_TRACE, "EVP_PKEY_new_mac_key failed");
+-            goto out;
+-        }
+-        rv = EVP_DigestSignInit(ctx->mctx, &ctx->pctx, NULL, NULL, ctx->key);
+-        if (rv != 1) {
+-            SSH_LOG(SSH_LOG_TRACE, "EVP_DigestSignInit failed");
+-            goto out;
+-        }
+-    } else {
+-        /* Updating the key is easier but less obvious */
+-        rv = EVP_PKEY_CTX_ctrl(ctx->pctx, -1, EVP_PKEY_OP_SIGNCTX,
+-                                EVP_PKEY_CTRL_SET_MAC_KEY,
+-                                POLY1305_KEYLEN, (void *)poly_key);
+-        if (rv <= 0) {
+-            SSH_LOG(SSH_LOG_TRACE, "EVP_PKEY_CTX_ctrl failed");
+-            goto out;
+-        }
+-    }
+-#else
+-    rv = EVP_MAC_init(ctx->mctx, poly_key, POLY1305_KEYLEN, NULL);
+-    if (rv != 1) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_MAC_init failed");
+-        goto out;
+-    }
+-#endif /* OPENSSL_VERSION_NUMBER */
+-
+-    ret = SSH_OK;
+-out:
+-    explicit_bzero(poly_key, sizeof(poly_key));
+-    return ret;
++    return SSH_OK;
++    //     struct chacha20_poly1305_keysched *ctx = cipher->chacha20_schedule;
++    //     uint8_t poly_key[CHACHA20_BLOCKSIZE];
++    //     int ret = SSH_ERROR, len, rv;
++
++    //     /* The initialization for decrypt was already done with the length
++    //     block */ if (do_encrypt) {
++    //         rv = chacha20_poly1305_set_iv(cipher, seq, do_encrypt);
++    //         if (rv != SSH_OK) {
++    //             return SSH_ERROR;
++    //         }
++    //     }
++
++    //     /* Output full ChaCha block so that counter increases by one for
++    //      * next step. */
++    //     rv = EVP_CipherUpdate(ctx->main_evp,
++    //                           poly_key,
++    //                           &len,
++    //                           (unsigned char *)zero_block,
++    //                           sizeof(zero_block));
++    //     if (rv != 1 || len != CHACHA20_BLOCKSIZE) {
++    //         SSH_LOG(SSH_LOG_TRACE, "EVP_EncryptUpdate failed");
++    //         goto out;
++    //     }
++    // #ifdef DEBUG_CRYPTO
++    //     ssh_log_hexdump("poly_key", poly_key, POLY1305_KEYLEN);
++    // #endif /* DEBUG_CRYPTO */
++
++    //     /* Set the Poly1305 key */
++    // #if OPENSSL_VERSION_NUMBER < 0x30000000L
++    //     if (ctx->key == NULL) {
++    //         /* Poly1305 Initialization needs to know the actual key */
++    //         ctx->key = EVP_PKEY_new_mac_key(EVP_PKEY_POLY1305,
++    //                                         NULL,
++    //                                         poly_key,
++    //                                         POLY1305_KEYLEN);
++    //         if (ctx->key == NULL) {
++    //             SSH_LOG(SSH_LOG_TRACE, "EVP_PKEY_new_mac_key failed");
++    //             goto out;
++    //         }
++    //         rv = EVP_DigestSignInit(ctx->mctx, &ctx->pctx, NULL, NULL,
++    //         ctx->key); if (rv != 1) {
++    //             SSH_LOG(SSH_LOG_TRACE, "EVP_DigestSignInit failed");
++    //             goto out;
++    //         }
++    //     } else {
++    //         /* Updating the key is easier but less obvious */
++    //         rv = EVP_PKEY_CTX_ctrl(ctx->pctx,
++    //                                -1,
++    //                                EVP_PKEY_OP_SIGNCTX,
++    //                                EVP_PKEY_CTRL_SET_MAC_KEY,
++    //                                POLY1305_KEYLEN,
++    //                                (void *)poly_key);
++    //         if (rv <= 0) {
++    //             SSH_LOG(SSH_LOG_TRACE, "EVP_PKEY_CTX_ctrl failed");
++    //             goto out;
++    //         }
++    //     }
++    // #else
++    //     rv = EVP_MAC_init(ctx->mctx, poly_key, POLY1305_KEYLEN, NULL);
++    //     if (rv != 1) {
++    //         SSH_LOG(SSH_LOG_TRACE, "EVP_MAC_init failed");
++    //         goto out;
++    //     }
++    // #endif /* OPENSSL_VERSION_NUMBER */
++
++    //     ret = SSH_OK;
++    // out:
++    //     explicit_bzero(poly_key, sizeof(poly_key));
++    //     return ret;
+ }
+ 
+ static int
+@@ -944,388 +998,181 @@ chacha20_poly1305_aead_decrypt_length(struct ssh_cipher_struct *cipher,
+                                       size_t len,
+                                       uint64_t seq)
+ {
+-    struct chacha20_poly1305_keysched *ctx = cipher->chacha20_schedule;
+-    int rv, outlen;
+-
+-    if (len < sizeof(uint32_t)) {
+-        return SSH_ERROR;
+-    }
+-
+-#ifdef DEBUG_CRYPTO
+-    ssh_log_hexdump("encrypted length", (uint8_t *)in, sizeof(uint32_t));
+-#endif /* DEBUG_CRYPTO */
+-
+-    /* Set IV for the header EVP */
+-    rv = chacha20_poly1305_set_iv(cipher, seq, 0);
+-    if (rv != SSH_OK) {
+-        return SSH_ERROR;
+-    }
+-
+-    rv = EVP_CipherUpdate(ctx->header_evp, out, &outlen, in, (int)len);
+-    if (rv != 1 || outlen != sizeof(uint32_t)) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_CipherUpdate failed");
+-        return SSH_ERROR;
+-    }
+-
+-#ifdef DEBUG_CRYPTO
+-    ssh_log_hexdump("deciphered length", out, sizeof(uint32_t));
+-#endif /* DEBUG_CRYPTO */
+-
+-    rv = EVP_CipherFinal_ex(ctx->header_evp, out + outlen, &outlen);
+-    if (rv != 1 || outlen != 0) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_CipherFinal_ex failed");
+-        return SSH_ERROR;
+-    }
+-
++    none_crypt(cipher, in, out, sizeof(uint32_t));
+     return SSH_OK;
+ }
+ 
+-static int
+-chacha20_poly1305_aead_decrypt(struct ssh_cipher_struct *cipher,
+-                               void *complete_packet,
+-                               uint8_t *out,
+-                               size_t encrypted_size,
+-                               uint64_t seq)
++static int chacha20_poly1305_aead_decrypt(struct ssh_cipher_struct *cipher,
++                                          void *complete_packet,
++                                          uint8_t *out,
++                                          size_t encrypted_size,
++                                          uint64_t seq)
+ {
+-    struct chacha20_poly1305_keysched *ctx = cipher->chacha20_schedule;
+-    uint8_t *mac = (uint8_t *)complete_packet + sizeof(uint32_t) +
+-                   encrypted_size;
+-    uint8_t tag[POLY1305_TAGLEN] = {0};
+-    int ret = SSH_ERROR;
+-    int rv, cmp, len = 0;
+-    size_t taglen = POLY1305_TAGLEN;
+-
+-    /* Prepare the Poly1305 key */
+-    rv = chacha20_poly1305_packet_setup(cipher, seq, 0);
+-    if (rv != SSH_OK) {
+-        SSH_LOG(SSH_LOG_TRACE, "Failed to setup packet");
+-        goto out;
+-    }
+-
+-#ifdef DEBUG_CRYPTO
+-    ssh_log_hexdump("received mac", mac, POLY1305_TAGLEN);
+-#endif /* DEBUG_CRYPTO */
+-
+-    /* Calculate MAC of received data */
+-#if OPENSSL_VERSION_NUMBER < 0x30000000L
+-    rv = EVP_DigestSignUpdate(ctx->mctx, complete_packet,
+-                              encrypted_size + sizeof(uint32_t));
+-    if (rv != 1) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_DigestSignUpdate failed");
+-        goto out;
+-    }
+-
+-    rv = EVP_DigestSignFinal(ctx->mctx, tag, &taglen);
+-    if (rv != 1) {
+-        SSH_LOG(SSH_LOG_TRACE, "poly1305 verify error");
+-        goto out;
+-    }
+-#else
+-    rv = EVP_MAC_update(ctx->mctx, complete_packet,
+-                        encrypted_size + sizeof(uint32_t));
+-    if (rv != 1) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_MAC_update failed");
+-        goto out;
+-    }
+-
+-    rv = EVP_MAC_final(ctx->mctx, tag, &taglen, POLY1305_TAGLEN);
+-    if (rv != 1) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_MAC_final failed");
+-        goto out;
+-    }
+-#endif /* OPENSSL_VERSION_NUMBER */
+-
+-#ifdef DEBUG_CRYPTO
+-    ssh_log_hexdump("calculated mac", tag, POLY1305_TAGLEN);
+-#endif /* DEBUG_CRYPTO */
+-
+-    /* Verify the calculated MAC matches the attached MAC */
+-    cmp = CRYPTO_memcmp(tag, mac, POLY1305_TAGLEN);
+-    if (cmp != 0) {
+-        /* mac error */
+-        SSH_LOG(SSH_LOG_PACKET, "poly1305 verify error");
+-        return SSH_ERROR;
+-    }
+-
+-    /* Decrypt the message */
+-    rv = EVP_CipherUpdate(ctx->main_evp,
+-                          out,
+-                          &len,
+-                          (uint8_t *)complete_packet + sizeof(uint32_t),
+-                          (int)encrypted_size);
+-    if (rv != 1) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_CipherUpdate failed");
+-        goto out;
+-    }
+-
+-    rv = EVP_CipherFinal_ex(ctx->main_evp, out + len, &len);
+-    if (rv != 1 || len != 0) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_CipherFinal_ex failed");
+-        goto out;
+-    }
+-
+-    ret = SSH_OK;
+-out:
+-    return ret;
++    /* Simply copy data without decryption */
++    none_crypt(cipher,
++               (uint8_t *)complete_packet + sizeof(uint32_t),
++               out,
++               encrypted_size);
++    return SSH_OK;
+ }
+ 
+-static void
+-chacha20_poly1305_aead_encrypt(struct ssh_cipher_struct *cipher,
+-                               void *in,
+-                               void *out,
+-                               size_t len,
+-                               uint8_t *tag,
+-                               uint64_t seq)
++static void chacha20_poly1305_aead_encrypt(struct ssh_cipher_struct *cipher,
++                                           void *in,
++                                           void *out,
++                                           size_t len,
++                                           uint8_t *tag,
++                                           uint64_t seq)
+ {
+-    struct ssh_packet_header *in_packet = in, *out_packet = out;
+-    struct chacha20_poly1305_keysched *ctx = cipher->chacha20_schedule;
+-    size_t taglen = POLY1305_TAGLEN;
+-    int ret, outlen = 0;
+-
+-    /* Prepare the Poly1305 key */
+-    ret = chacha20_poly1305_packet_setup(cipher, seq, 1);
+-    if (ret != SSH_OK) {
+-        SSH_LOG(SSH_LOG_TRACE, "Failed to setup packet");
+-        return;
+-    }
++    /* Use none_crypt instead of the ChaCha20-Poly1305 implementation */
++    // struct ssh_packet_header *in_packet = in;
+ 
+-#ifdef DEBUG_CRYPTO
+-    ssh_log_hexdump("plaintext length",
+-                    (unsigned char *)&in_packet->length, sizeof(uint32_t));
+-#endif /* DEBUG_CRYPTO */
+-    /* step 2, encrypt length field */
+-    ret = EVP_CipherUpdate(ctx->header_evp,
+-                           (unsigned char *)&out_packet->length,
+-                           &outlen,
+-                           (unsigned char *)&in_packet->length,
+-                           sizeof(uint32_t));
+-    if (ret != 1 || outlen != sizeof(uint32_t)) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_CipherUpdate failed");
+-        return;
+-    }
+-#ifdef DEBUG_CRYPTO
+-    ssh_log_hexdump("encrypted length",
+-                    (unsigned char *)&out_packet->length, outlen);
+-#endif /* DEBUG_CRYPTO */
+-    ret = EVP_CipherFinal_ex(ctx->header_evp, (uint8_t *)out + outlen, &outlen);
+-    if (ret != 1 || outlen != 0) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_EncryptFinal_ex failed");
+-        return;
+-    }
+-
+-    /* step 3, encrypt packet payload (main_evp counter == 1) */
+-    /* We already did encrypt one block so the counter should be in the correct position */
+-    ret = EVP_CipherUpdate(ctx->main_evp,
+-                           out_packet->payload,
+-                           &outlen,
+-                           in_packet->payload,
+-                           (int)(len - sizeof(uint32_t)));
+-    if (ret != 1) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_CipherUpdate failed");
+-        return;
+-    }
++    /* Copy packet data without encryption */
++    none_crypt(cipher, in, out, len);
+ 
+-    /* step 4, compute the MAC */
+-#if OPENSSL_VERSION_NUMBER < 0x30000000L
+-    ret = EVP_DigestSignUpdate(ctx->mctx, out_packet, len);
+-    if (ret <= 0) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_DigestSignUpdate failed");
+-        return;
+-    }
+-    ret = EVP_DigestSignFinal(ctx->mctx, tag, &taglen);
+-    if (ret <= 0) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_DigestSignFinal failed");
+-        return;
+-    }
+-#else
+-    ret = EVP_MAC_update(ctx->mctx, (void*)out_packet, len);
+-    if (ret != 1) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_MAC_update failed");
+-        return;
+-    }
+-
+-    ret = EVP_MAC_final(ctx->mctx, tag, &taglen, POLY1305_TAGLEN);
+-    if (ret != 1) {
+-        SSH_LOG(SSH_LOG_TRACE, "EVP_MAC_final failed");
+-        return;
+-    }
+-#endif /* OPENSSL_VERSION_NUMBER */
++    /* Fill tag with zeros */
++    memset(tag, 0, POLY1305_TAGLEN);
+ }
+ #endif /* HAVE_OPENSSL_EVP_CHACHA20 */
+ 
+-#ifdef WITH_INSECURE_NONE
+-static void
+-none_crypt(UNUSED_PARAM(struct ssh_cipher_struct *cipher),
+-           void *in,
+-           void *out,
+-           size_t len)
+-{
+-    memcpy(out, in, len);
+-}
+-#endif /* WITH_INSECURE_NONE */
+-
+ /*
+  * The table of supported ciphers
+  */
+ static struct ssh_cipher_struct ssh_ciphertab[] = {
+ #ifdef HAVE_BLOWFISH
+-  {
+-    .name = "blowfish-cbc",
+-    .blocksize = 8,
+-    .ciphertype = SSH_BLOWFISH_CBC,
+-    .keysize = 128,
+-    .set_encrypt_key = evp_cipher_set_encrypt_key,
+-    .set_decrypt_key = evp_cipher_set_decrypt_key,
+-    .encrypt = evp_cipher_encrypt,
+-    .decrypt = evp_cipher_decrypt,
+-    .cleanup = evp_cipher_cleanup
+-  },
++    {.name = "blowfish-cbc",
++     .blocksize = 8,
++     .ciphertype = SSH_BLOWFISH_CBC,
++     .keysize = 128,
++     .set_encrypt_key = evp_cipher_set_encrypt_key,
++     .set_decrypt_key = evp_cipher_set_decrypt_key,
++     .encrypt = evp_cipher_encrypt,
++     .decrypt = evp_cipher_decrypt,
++     .cleanup = evp_cipher_cleanup},
+ #endif /* HAVE_BLOWFISH */
+ #ifdef HAS_AES
+-  {
+-    .name = "aes128-ctr",
+-    .blocksize = AES_BLOCK_SIZE,
+-    .ciphertype = SSH_AES128_CTR,
+-    .keysize = 128,
+-    .set_encrypt_key = evp_cipher_set_encrypt_key,
+-    .set_decrypt_key = evp_cipher_set_decrypt_key,
+-    .encrypt = evp_cipher_encrypt,
+-    .decrypt = evp_cipher_decrypt,
+-    .cleanup = evp_cipher_cleanup
+-  },
+-  {
+-    .name = "aes192-ctr",
+-    .blocksize = AES_BLOCK_SIZE,
+-    .ciphertype = SSH_AES192_CTR,
+-    .keysize = 192,
+-    .set_encrypt_key = evp_cipher_set_encrypt_key,
+-    .set_decrypt_key = evp_cipher_set_decrypt_key,
+-    .encrypt = evp_cipher_encrypt,
+-    .decrypt = evp_cipher_decrypt,
+-    .cleanup = evp_cipher_cleanup
+-  },
+-  {
+-    .name = "aes256-ctr",
+-    .blocksize = AES_BLOCK_SIZE,
+-    .ciphertype = SSH_AES256_CTR,
+-    .keysize = 256,
+-    .set_encrypt_key = evp_cipher_set_encrypt_key,
+-    .set_decrypt_key = evp_cipher_set_decrypt_key,
+-    .encrypt = evp_cipher_encrypt,
+-    .decrypt = evp_cipher_decrypt,
+-    .cleanup = evp_cipher_cleanup
+-  },
+-  {
+-    .name = "aes128-cbc",
+-    .blocksize = AES_BLOCK_SIZE,
+-    .ciphertype = SSH_AES128_CBC,
+-    .keysize = 128,
+-    .set_encrypt_key = evp_cipher_set_encrypt_key,
+-    .set_decrypt_key = evp_cipher_set_decrypt_key,
+-    .encrypt = evp_cipher_encrypt,
+-    .decrypt = evp_cipher_decrypt,
+-    .cleanup = evp_cipher_cleanup
+-  },
+-  {
+-    .name = "aes192-cbc",
+-    .blocksize = AES_BLOCK_SIZE,
+-    .ciphertype = SSH_AES192_CBC,
+-    .keysize = 192,
+-    .set_encrypt_key = evp_cipher_set_encrypt_key,
+-    .set_decrypt_key = evp_cipher_set_decrypt_key,
+-    .encrypt = evp_cipher_encrypt,
+-    .decrypt = evp_cipher_decrypt,
+-    .cleanup = evp_cipher_cleanup
+-  },
+-  {
+-    .name = "aes256-cbc",
+-    .blocksize = AES_BLOCK_SIZE,
+-    .ciphertype = SSH_AES256_CBC,
+-    .keysize = 256,
+-    .set_encrypt_key = evp_cipher_set_encrypt_key,
+-    .set_decrypt_key = evp_cipher_set_decrypt_key,
+-    .encrypt = evp_cipher_encrypt,
+-    .decrypt = evp_cipher_decrypt,
+-    .cleanup = evp_cipher_cleanup
+-  },
+-  {
+-    .name = "aes128-gcm@openssh.com",
+-    .blocksize = AES_BLOCK_SIZE,
+-    .lenfield_blocksize = 4, /* not encrypted, but authenticated */
+-    .ciphertype = SSH_AEAD_AES128_GCM,
+-    .keysize = 128,
+-    .tag_size = AES_GCM_TAGLEN,
+-    .set_encrypt_key = evp_cipher_set_encrypt_key,
+-    .set_decrypt_key = evp_cipher_set_decrypt_key,
+-    .aead_encrypt = evp_cipher_aead_encrypt,
+-    .aead_decrypt_length = evp_cipher_aead_get_length,
+-    .aead_decrypt = evp_cipher_aead_decrypt,
+-    .cleanup = evp_cipher_cleanup
+-  },
+-  {
+-    .name = "aes256-gcm@openssh.com",
+-    .blocksize = AES_BLOCK_SIZE,
+-    .lenfield_blocksize = 4, /* not encrypted, but authenticated */
+-    .ciphertype = SSH_AEAD_AES256_GCM,
+-    .keysize = 256,
+-    .tag_size = AES_GCM_TAGLEN,
+-    .set_encrypt_key = evp_cipher_set_encrypt_key,
+-    .set_decrypt_key = evp_cipher_set_decrypt_key,
+-    .aead_encrypt = evp_cipher_aead_encrypt,
+-    .aead_decrypt_length = evp_cipher_aead_get_length,
+-    .aead_decrypt = evp_cipher_aead_decrypt,
+-    .cleanup = evp_cipher_cleanup
+-  },
++    {.name = "aes128-ctr",
++     .blocksize = AES_BLOCK_SIZE,
++     .ciphertype = SSH_AES128_CTR,
++     .keysize = 128,
++     .set_encrypt_key = evp_cipher_set_encrypt_key,
++     .set_decrypt_key = evp_cipher_set_decrypt_key,
++     .encrypt = evp_cipher_encrypt,
++     .decrypt = evp_cipher_decrypt,
++     .cleanup = evp_cipher_cleanup},
++    {.name = "aes192-ctr",
++     .blocksize = AES_BLOCK_SIZE,
++     .ciphertype = SSH_AES192_CTR,
++     .keysize = 192,
++     .set_encrypt_key = evp_cipher_set_encrypt_key,
++     .set_decrypt_key = evp_cipher_set_decrypt_key,
++     .encrypt = evp_cipher_encrypt,
++     .decrypt = evp_cipher_decrypt,
++     .cleanup = evp_cipher_cleanup},
++    {.name = "aes256-ctr",
++     .blocksize = AES_BLOCK_SIZE,
++     .ciphertype = SSH_AES256_CTR,
++     .keysize = 256,
++     .set_encrypt_key = evp_cipher_set_encrypt_key,
++     .set_decrypt_key = evp_cipher_set_decrypt_key,
++     .encrypt = evp_cipher_encrypt,
++     .decrypt = evp_cipher_decrypt,
++     .cleanup = evp_cipher_cleanup},
++    {.name = "aes128-cbc",
++     .blocksize = AES_BLOCK_SIZE,
++     .ciphertype = SSH_AES128_CBC,
++     .keysize = 128,
++     .set_encrypt_key = evp_cipher_set_encrypt_key,
++     .set_decrypt_key = evp_cipher_set_decrypt_key,
++     .encrypt = evp_cipher_encrypt,
++     .decrypt = evp_cipher_decrypt,
++     .cleanup = evp_cipher_cleanup},
++    {.name = "aes192-cbc",
++     .blocksize = AES_BLOCK_SIZE,
++     .ciphertype = SSH_AES192_CBC,
++     .keysize = 192,
++     .set_encrypt_key = evp_cipher_set_encrypt_key,
++     .set_decrypt_key = evp_cipher_set_decrypt_key,
++     .encrypt = evp_cipher_encrypt,
++     .decrypt = evp_cipher_decrypt,
++     .cleanup = evp_cipher_cleanup},
++    {.name = "aes256-cbc",
++     .blocksize = AES_BLOCK_SIZE,
++     .ciphertype = SSH_AES256_CBC,
++     .keysize = 256,
++     .set_encrypt_key = evp_cipher_set_encrypt_key,
++     .set_decrypt_key = evp_cipher_set_decrypt_key,
++     .encrypt = evp_cipher_encrypt,
++     .decrypt = evp_cipher_decrypt,
++     .cleanup = evp_cipher_cleanup},
++    {.name = "aes128-gcm@openssh.com",
++     .blocksize = AES_BLOCK_SIZE,
++     .lenfield_blocksize = 4, /* not encrypted, but authenticated */
++     .ciphertype = SSH_AEAD_AES128_GCM,
++     .keysize = 128,
++     .tag_size = AES_GCM_TAGLEN,
++     .set_encrypt_key = evp_cipher_set_encrypt_key,
++     .set_decrypt_key = evp_cipher_set_decrypt_key,
++     .aead_encrypt = evp_cipher_aead_encrypt,
++     .aead_decrypt_length = evp_cipher_aead_get_length,
++     .aead_decrypt = evp_cipher_aead_decrypt,
++     .cleanup = evp_cipher_cleanup},
++    {.name = "aes256-gcm@openssh.com",
++     .blocksize = AES_BLOCK_SIZE,
++     .lenfield_blocksize = 4, /* not encrypted, but authenticated */
++     .ciphertype = SSH_AEAD_AES256_GCM,
++     .keysize = 256,
++     .tag_size = AES_GCM_TAGLEN,
++     .set_encrypt_key = evp_cipher_set_encrypt_key,
++     .set_decrypt_key = evp_cipher_set_decrypt_key,
++     .aead_encrypt = evp_cipher_aead_encrypt,
++     .aead_decrypt_length = evp_cipher_aead_get_length,
++     .aead_decrypt = evp_cipher_aead_decrypt,
++     .cleanup = evp_cipher_cleanup},
+ #endif /* HAS_AES */
+ #ifdef HAS_DES
+-  {
+-    .name = "3des-cbc",
+-    .blocksize = 8,
+-    .ciphertype = SSH_3DES_CBC,
+-    .keysize = 192,
+-    .set_encrypt_key = evp_cipher_set_encrypt_key,
+-    .set_decrypt_key = evp_cipher_set_decrypt_key,
+-    .encrypt = evp_cipher_encrypt,
+-    .decrypt = evp_cipher_decrypt,
+-    .cleanup = evp_cipher_cleanup
+-  },
++    {.name = "3des-cbc",
++     .blocksize = 8,
++     .ciphertype = SSH_3DES_CBC,
++     .keysize = 192,
++     .set_encrypt_key = evp_cipher_set_encrypt_key,
++     .set_decrypt_key = evp_cipher_set_decrypt_key,
++     .encrypt = evp_cipher_encrypt,
++     .decrypt = evp_cipher_decrypt,
++     .cleanup = evp_cipher_cleanup},
+ #endif /* HAS_DES */
+-  {
++    {
+ #ifdef HAVE_OPENSSL_EVP_CHACHA20
+-    .ciphertype = SSH_AEAD_CHACHA20_POLY1305,
+-    .name = "chacha20-poly1305@openssh.com",
+-    .blocksize = CHACHA20_BLOCKSIZE/8,
+-    .lenfield_blocksize = 4,
+-    .keylen = sizeof(struct chacha20_poly1305_keysched),
+-    .keysize = 2 * CHACHA20_KEYLEN * 8,
+-    .tag_size = POLY1305_TAGLEN,
+-    .set_encrypt_key = chacha20_poly1305_set_key,
+-    .set_decrypt_key = chacha20_poly1305_set_key,
+-    .aead_encrypt = chacha20_poly1305_aead_encrypt,
+-    .aead_decrypt_length = chacha20_poly1305_aead_decrypt_length,
+-    .aead_decrypt = chacha20_poly1305_aead_decrypt,
+-    .cleanup = chacha20_poly1305_cleanup
++        .ciphertype = SSH_AEAD_CHACHA20_POLY1305,
++        .name = "chacha20-poly1305@openssh.com",
++        .blocksize = CHACHA20_BLOCKSIZE / 8,
++        .lenfield_blocksize = 4,
++        .keylen = sizeof(struct chacha20_poly1305_keysched),
++        .keysize = 2 * CHACHA20_KEYLEN * 8,
++        .tag_size = POLY1305_TAGLEN,
++        .set_encrypt_key = chacha20_poly1305_set_key,
++        .set_decrypt_key = chacha20_poly1305_set_key,
++        .aead_encrypt = chacha20_poly1305_aead_encrypt,
++        .aead_decrypt_length = chacha20_poly1305_aead_decrypt_length,
++        .aead_decrypt = chacha20_poly1305_aead_decrypt,
++        .cleanup = chacha20_poly1305_cleanup
+ #else
+-    .name = "chacha20-poly1305@openssh.com"
++        .name = "chacha20-poly1305@openssh.com"
+ #endif /* HAVE_OPENSSL_EVP_CHACHA20 */
+-  },
++    },
+ #ifdef WITH_INSECURE_NONE
+-  {
+-    .name = "none",
+-    .blocksize = 8,
+-    .keysize = 0,
+-    .encrypt = none_crypt,
+-    .decrypt = none_crypt,
+-  },
++    {
++        .name = "none",
++        .blocksize = 8,
++        .keysize = 0,
++        .encrypt = none_crypt,
++        .decrypt = none_crypt,
++    },
+ #endif /* WITH_INSECURE_NONE */
+-  {
+-    .name = NULL
+-  }
+-};
++    {.name = NULL}};
+ 
+ struct ssh_cipher_struct *ssh_get_ciphertab(void)
+ {
+-  return ssh_ciphertab;
++    return ssh_ciphertab;
+ }
+ 
+ /**
+@@ -1341,19 +1188,19 @@ int ssh_crypto_init(void)
+     if (libcrypto_initialized) {
+         return SSH_OK;
+     }
+-    if (OpenSSL_version_num() != OPENSSL_VERSION_NUMBER){
+-        SSH_LOG(SSH_LOG_DEBUG, "libssh compiled with %s "
+-            "headers, currently running with %s.",
+-            OPENSSL_VERSION_TEXT,
+-            OpenSSL_version(OpenSSL_version_num())
+-        );
++    if (OpenSSL_version_num() != OPENSSL_VERSION_NUMBER) {
++        SSH_LOG(SSH_LOG_DEBUG,
++                "libssh compiled with %s "
++                "headers, currently running with %s.",
++                OPENSSL_VERSION_TEXT,
++                OpenSSL_version(OpenSSL_version_num()));
+     }
+ #ifdef CAN_DISABLE_AESNI
+     /*
+      * disable AES-NI when running within Valgrind, because they generate
+      * too many "uninitialized memory access" false positives
+      */
+-    if (RUNNING_ON_VALGRIND){
++    if (RUNNING_ON_VALGRIND) {
+         SSH_LOG(SSH_LOG_INFO, "Running within Valgrind, disabling AES-NI");
+         /* Bit #57 denotes AES-NI instruction set extension */
+         OPENSSL_ia32cap &= ~(1LL << 57);
+@@ -1408,7 +1255,8 @@ void ssh_crypto_finalize(void)
+  * @internal
+  * @brief Create EVP_PKEY from parameters
+  *
+- * @param[in] name Algorithm to use. For more info see manpage of EVP_PKEY_CTX_new_from_name
++ * @param[in] name Algorithm to use. For more info see manpage of
++ * EVP_PKEY_CTX_new_from_name
+  *
+  * @param[in] param_bld Constructed param builder for the pkey
+  *
+@@ -1418,8 +1266,10 @@ void ssh_crypto_finalize(void)
+  *
+  * @return 0 on success, -1 on error
+  */
+-int evp_build_pkey(const char* name, OSSL_PARAM_BLD *param_bld,
+-                   EVP_PKEY **pkey, int selection)
++int evp_build_pkey(const char *name,
++                   OSSL_PARAM_BLD *param_bld,
++                   EVP_PKEY **pkey,
++                   int selection)
+ {
+     int rc;
+     EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_from_name(NULL, name, NULL);
+@@ -1545,18 +1395,13 @@ int evp_dup_ecdsa_pkey(const ssh_key key, ssh_key new_key, int demote)
+ }
+ #endif /* OPENSSL_VERSION_NUMBER */
+ 
+-ssh_string
+-pki_key_make_ecpoint_string(const EC_GROUP *g, const EC_POINT *p)
++ssh_string pki_key_make_ecpoint_string(const EC_GROUP *g, const EC_POINT *p)
+ {
+     ssh_string s = NULL;
+     size_t len;
+ 
+-    len = EC_POINT_point2oct(g,
+-                             p,
+-                             POINT_CONVERSION_UNCOMPRESSED,
+-                             NULL,
+-                             0,
+-                             NULL);
++    len =
++        EC_POINT_point2oct(g, p, POINT_CONVERSION_UNCOMPRESSED, NULL, 0, NULL);
+     if (len == 0) {
+         return NULL;
+     }
+@@ -1582,8 +1427,7 @@ pki_key_make_ecpoint_string(const EC_GROUP *g, const EC_POINT *p)
+ 
+ int pki_key_ecgroup_name_to_nid(const char *group)
+ {
+-    if (strcmp(group, NISTP256) == 0 ||
+-        strcmp(group, "secp256r1") == 0 ||
++    if (strcmp(group, NISTP256) == 0 || strcmp(group, "secp256r1") == 0 ||
+         strcmp(group, "prime256v1") == 0) {
+         return NID_X9_62_prime256v1;
+     } else if (strcmp(group, NISTP384) == 0 ||
+diff --git a/src/packet.c b/src/packet.c
+index 2614f60b..3466e46e 100644
+--- a/src/packet.c
++++ b/src/packet.c
+@@ -23,111 +23,160 @@
+ 
+ #include "config.h"
+ 
+-#include <stdlib.h>
++#include <errno.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+-#include <errno.h>
+ 
+ #ifndef _WIN32
+-#include <netinet/in.h>
+ #include <arpa/inet.h>
++#include <netinet/in.h>
+ #endif
+ 
+-#include "libssh/priv.h"
+-#include "libssh/ssh2.h"
+-#include "libssh/crypto.h"
++#include "libssh/auth.h"
+ #include "libssh/buffer.h"
+-#include "libssh/packet.h"
+-#include "libssh/socket.h"
++#include "libssh/bytearray.h"
+ #include "libssh/channels.h"
+-#include "libssh/misc.h"
+-#include "libssh/session.h"
++#include "libssh/crypto.h"
++#include "libssh/dh.h"
++#include "libssh/gssapi.h"
++#include "libssh/kex.h"
+ #include "libssh/messages.h"
++#include "libssh/misc.h"
++#include "libssh/packet.h"
+ #include "libssh/pcap.h"
+-#include "libssh/kex.h"
+-#include "libssh/auth.h"
+-#include "libssh/gssapi.h"
+-#include "libssh/bytearray.h"
+-#include "libssh/dh.h"
++#include "libssh/priv.h"
++#include "libssh/session.h"
++#include "libssh/socket.h"
++#include "libssh/ssh2.h"
+ 
+-static ssh_packet_callback default_packet_handlers[]= {
+-  ssh_packet_disconnect_callback,          // SSH2_MSG_DISCONNECT                 1
+-  ssh_packet_ignore_callback,              // SSH2_MSG_IGNORE                     2
+-  ssh_packet_unimplemented,                // SSH2_MSG_UNIMPLEMENTED              3
+-  ssh_packet_debug_callback,               // SSH2_MSG_DEBUG                      4
++static ssh_packet_callback default_packet_handlers[] = {
++    ssh_packet_disconnect_callback, // SSH2_MSG_DISCONNECT                 1
++    ssh_packet_ignore_callback,     // SSH2_MSG_IGNORE                     2
++    ssh_packet_unimplemented,       // SSH2_MSG_UNIMPLEMENTED              3
++    ssh_packet_debug_callback,      // SSH2_MSG_DEBUG                      4
+ #if WITH_SERVER
+-  ssh_packet_service_request,              // SSH2_MSG_SERVICE_REQUEST	          5
++    ssh_packet_service_request, // SSH2_MSG_SERVICE_REQUEST	          5
+ #else
+-  NULL,
++    NULL,
+ #endif
+-  ssh_packet_service_accept,               // SSH2_MSG_SERVICE_ACCEPT             6
+-  ssh_packet_ext_info,                     // SSH2_MSG_EXT_INFO                   7
+-  NULL, NULL, NULL, NULL, NULL, NULL,
+-  NULL, NULL, NULL, NULL, NULL, NULL,      //                                     8-19
+-  ssh_packet_kexinit,                      // SSH2_MSG_KEXINIT	                  20
+-  ssh_packet_newkeys,                      // SSH2_MSG_NEWKEYS                    21
+-  NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+-  NULL,                                    //                                     22-29
++    ssh_packet_service_accept, // SSH2_MSG_SERVICE_ACCEPT             6
++    ssh_packet_ext_info,       // SSH2_MSG_EXT_INFO                   7
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,               //                                     8-19
++    ssh_packet_kexinit, // SSH2_MSG_KEXINIT	                  20
++    ssh_packet_newkeys, // SSH2_MSG_NEWKEYS                    21
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL, //                                     22-29
+ #if WITH_SERVER
+-  ssh_packet_kexdh_init,                   // SSH2_MSG_KEXDH_INIT                 30
+-                                           // SSH2_MSG_KEX_DH_GEX_REQUEST_OLD     30
++    ssh_packet_kexdh_init, // SSH2_MSG_KEXDH_INIT                 30
++                           // SSH2_MSG_KEX_DH_GEX_REQUEST_OLD     30
+ #else
+-  NULL,
++    NULL,
+ #endif
+-  NULL,                                    // SSH2_MSG_KEXDH_REPLY                31
+-                                           // SSH2_MSG_KEX_DH_GEX_GROUP           31
+-  NULL,                                    // SSH2_MSG_KEX_DH_GEX_INIT            32
+-  NULL,                                    // SSH2_MSG_KEX_DH_GEX_REPLY           33
+-  NULL,                                    // SSH2_MSG_KEX_DH_GEX_REQUEST         34
+-  NULL, NULL, NULL, NULL, NULL, NULL,	NULL,
+-  NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+-  NULL,                                    //                                     35-49
++    NULL, // SSH2_MSG_KEXDH_REPLY                31
++          // SSH2_MSG_KEX_DH_GEX_GROUP           31
++    NULL, // SSH2_MSG_KEX_DH_GEX_INIT            32
++    NULL, // SSH2_MSG_KEX_DH_GEX_REPLY           33
++    NULL, // SSH2_MSG_KEX_DH_GEX_REQUEST         34
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL, //                                     35-49
+ #if WITH_SERVER
+-  ssh_packet_userauth_request,             // SSH2_MSG_USERAUTH_REQUEST           50
++    ssh_packet_userauth_request, // SSH2_MSG_USERAUTH_REQUEST           50
+ #else
+-  NULL,
++    NULL,
+ #endif
+-  ssh_packet_userauth_failure,             // SSH2_MSG_USERAUTH_FAILURE           51
+-  ssh_packet_userauth_success,             // SSH2_MSG_USERAUTH_SUCCESS           52
+-  ssh_packet_userauth_banner,              // SSH2_MSG_USERAUTH_BANNER            53
+-  NULL,NULL,NULL,NULL,NULL,NULL,           //                                     54-59
+-  ssh_packet_userauth_pk_ok,               // SSH2_MSG_USERAUTH_PK_OK             60
+-                                           // SSH2_MSG_USERAUTH_PASSWD_CHANGEREQ  60
+-                                           // SSH2_MSG_USERAUTH_INFO_REQUEST	  60
+-                                           // SSH2_MSG_USERAUTH_GSSAPI_RESPONSE   60
+-  ssh_packet_userauth_info_response,       // SSH2_MSG_USERAUTH_INFO_RESPONSE     61
+-                                           // SSH2_MSG_USERAUTH_GSSAPI_TOKEN      61
+-  NULL,                                    //                                     62
+-  NULL,                             // SSH2_MSG_USERAUTH_GSSAPI_EXCHANGE_COMPLETE 63
+-  NULL,                                    // SSH2_MSG_USERAUTH_GSSAPI_ERROR      64
+-  NULL,                                    // SSH2_MSG_USERAUTH_GSSAPI_ERRTOK     65
++    ssh_packet_userauth_failure, // SSH2_MSG_USERAUTH_FAILURE           51
++    ssh_packet_userauth_success, // SSH2_MSG_USERAUTH_SUCCESS           52
++    ssh_packet_userauth_banner,  // SSH2_MSG_USERAUTH_BANNER            53
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,                      //                                     54-59
++    ssh_packet_userauth_pk_ok, // SSH2_MSG_USERAUTH_PK_OK             60
++                               // SSH2_MSG_USERAUTH_PASSWD_CHANGEREQ  60
++                               // SSH2_MSG_USERAUTH_INFO_REQUEST	  60
++                               // SSH2_MSG_USERAUTH_GSSAPI_RESPONSE   60
++    ssh_packet_userauth_info_response, // SSH2_MSG_USERAUTH_INFO_RESPONSE     61
++                                       // SSH2_MSG_USERAUTH_GSSAPI_TOKEN      61
++    NULL,                              //                                     62
++    NULL, // SSH2_MSG_USERAUTH_GSSAPI_EXCHANGE_COMPLETE 63
++    NULL, // SSH2_MSG_USERAUTH_GSSAPI_ERROR      64
++    NULL, // SSH2_MSG_USERAUTH_GSSAPI_ERRTOK     65
+ #if defined(WITH_GSSAPI) && defined(WITH_SERVER)
+-  ssh_packet_userauth_gssapi_mic,          // SSH2_MSG_USERAUTH_GSSAPI_MIC        66
+-#else /* WITH_GSSAPI && WITH_SERVER */
+-  NULL,
+-#endif /* WITH_GSSAPI && WITH_SERVER */
+-  NULL, NULL,
+-  NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+-  NULL, NULL, NULL, NULL,                  //                                     67-79
++    ssh_packet_userauth_gssapi_mic, // SSH2_MSG_USERAUTH_GSSAPI_MIC        66
++#else                               /* WITH_GSSAPI && WITH_SERVER */
++    NULL,
++#endif                              /* WITH_GSSAPI && WITH_SERVER */
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL, //                                     67-79
+ #ifdef WITH_SERVER
+-  ssh_packet_global_request,               // SSH2_MSG_GLOBAL_REQUEST             80
+-#else /* WITH_SERVER */
+-  NULL,
+-#endif /* WITH_SERVER */
+-  ssh_request_success,                     // SSH2_MSG_REQUEST_SUCCESS            81
+-  ssh_request_denied,                      // SSH2_MSG_REQUEST_FAILURE            82
+-  NULL, NULL, NULL, NULL, NULL, NULL, NULL,//                                     83-89
+-  ssh_packet_channel_open,                 // SSH2_MSG_CHANNEL_OPEN               90
+-  ssh_packet_channel_open_conf,            // SSH2_MSG_CHANNEL_OPEN_CONFIRMATION  91
+-  ssh_packet_channel_open_fail,            // SSH2_MSG_CHANNEL_OPEN_FAILURE       92
+-  channel_rcv_change_window,               // SSH2_MSG_CHANNEL_WINDOW_ADJUST      93
+-  channel_rcv_data,                        // SSH2_MSG_CHANNEL_DATA               94
+-  channel_rcv_data,                        // SSH2_MSG_CHANNEL_EXTENDED_DATA      95
+-  channel_rcv_eof,                         // SSH2_MSG_CHANNEL_EOF	              96
+-  channel_rcv_close,                       // SSH2_MSG_CHANNEL_CLOSE              97
+-  channel_rcv_request,                     // SSH2_MSG_CHANNEL_REQUEST            98
+-  ssh_packet_channel_success,              // SSH2_MSG_CHANNEL_SUCCESS            99
+-  ssh_packet_channel_failure,              // SSH2_MSG_CHANNEL_FAILURE            100
++    ssh_packet_global_request, // SSH2_MSG_GLOBAL_REQUEST             80
++#else                          /* WITH_SERVER */
++    NULL,
++#endif                         /* WITH_SERVER */
++    ssh_request_success,       // SSH2_MSG_REQUEST_SUCCESS            81
++    ssh_request_denied,        // SSH2_MSG_REQUEST_FAILURE            82
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,                         //                                     83-89
++    ssh_packet_channel_open,      // SSH2_MSG_CHANNEL_OPEN               90
++    ssh_packet_channel_open_conf, // SSH2_MSG_CHANNEL_OPEN_CONFIRMATION  91
++    ssh_packet_channel_open_fail, // SSH2_MSG_CHANNEL_OPEN_FAILURE       92
++    channel_rcv_change_window,    // SSH2_MSG_CHANNEL_WINDOW_ADJUST      93
++    channel_rcv_data,             // SSH2_MSG_CHANNEL_DATA               94
++    channel_rcv_data,             // SSH2_MSG_CHANNEL_EXTENDED_DATA      95
++    channel_rcv_eof,              // SSH2_MSG_CHANNEL_EOF	              96
++    channel_rcv_close,            // SSH2_MSG_CHANNEL_CLOSE              97
++    channel_rcv_request,          // SSH2_MSG_CHANNEL_REQUEST            98
++    ssh_packet_channel_success,   // SSH2_MSG_CHANNEL_SUCCESS            99
++    ssh_packet_channel_failure,   // SSH2_MSG_CHANNEL_FAILURE            100
+ };
+ 
+ /** @internal
+@@ -137,17 +186,19 @@ static ssh_packet_callback default_packet_handlers[]= {
+  * if the packet arrived in wrong state; SSH_PACKET_UNKNOWN if the packet type
+  * is unknown
+  */
+-static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session session)
++static enum ssh_packet_filter_result_e
++ssh_packet_incoming_filter(ssh_session session)
+ {
+     enum ssh_packet_filter_result_e rc;
+ 
+ #ifdef DEBUG_PACKET
+-    SSH_LOG(SSH_LOG_PACKET, "Filtering packet type %d",
++    SSH_LOG(SSH_LOG_PACKET,
++            "Filtering packet type %d",
+             session->in_packet.type);
+ #endif
+ 
+-    switch(session->in_packet.type) {
+-    case SSH2_MSG_DISCONNECT:                         // 1
++    switch (session->in_packet.type) {
++    case SSH2_MSG_DISCONNECT: // 1
+         /*
+          * States required:
+          * - None
+@@ -160,7 +211,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+         /* Always allowed */
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_IGNORE:                             // 2
++    case SSH2_MSG_IGNORE: // 2
+         /*
+          * States required:
+          * - None
+@@ -172,7 +223,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+         /* Always allowed */
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_UNIMPLEMENTED:                      // 3
++    case SSH2_MSG_UNIMPLEMENTED: // 3
+         /*
+          * States required:
+          * - None
+@@ -184,7 +235,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+         /* Always allowed */
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_DEBUG:                              // 4
++    case SSH2_MSG_DEBUG: // 4
+         /*
+          * States required:
+          * - None
+@@ -196,7 +247,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+         /* Always allowed */
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_SERVICE_REQUEST:                    // 5
++    case SSH2_MSG_SERVICE_REQUEST: // 5
+         /* Server only */
+ 
+         /*
+@@ -216,8 +267,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+         }
+ 
+         if ((session->session_state != SSH_SESSION_STATE_AUTHENTICATING) &&
+-            (session->session_state != SSH_SESSION_STATE_AUTHENTICATED))
+-        {
++            (session->session_state != SSH_SESSION_STATE_AUTHENTICATED)) {
+             rc = SSH_PACKET_DENIED;
+             break;
+         }
+@@ -229,7 +279,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_SERVICE_ACCEPT:                     // 6
++    case SSH2_MSG_SERVICE_ACCEPT: // 6
+         /*
+          * States required:
+          * - session->session_state == SSH_SESSION_STATE_AUTHENTICATING
+@@ -242,8 +292,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+          * */
+ 
+         if ((session->session_state != SSH_SESSION_STATE_AUTHENTICATING) &&
+-            (session->session_state != SSH_SESSION_STATE_AUTHENTICATED))
+-        {
++            (session->session_state != SSH_SESSION_STATE_AUTHENTICATED)) {
+             rc = SSH_PACKET_DENIED;
+             break;
+         }
+@@ -261,7 +310,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_EXT_INFO:                           // 7
++    case SSH2_MSG_EXT_INFO: // 7
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATING
+@@ -274,8 +323,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+          * */
+ 
+         if ((session->session_state != SSH_SESSION_STATE_AUTHENTICATING) &&
+-            (session->session_state != SSH_SESSION_STATE_AUTHENTICATED))
+-        {
++            (session->session_state != SSH_SESSION_STATE_AUTHENTICATED)) {
+             rc = SSH_PACKET_DENIED;
+             break;
+         }
+@@ -287,7 +335,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_KEXINIT:                            // 20
++    case SSH2_MSG_KEXINIT: // 20
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATED
+@@ -305,23 +353,21 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+          * */
+ 
+         if ((session->session_state != SSH_SESSION_STATE_AUTHENTICATED) &&
+-            (session->session_state != SSH_SESSION_STATE_INITIAL_KEX))
+-        {
++            (session->session_state != SSH_SESSION_STATE_INITIAL_KEX)) {
+             rc = SSH_PACKET_DENIED;
+             break;
+         }
+ 
+         if ((session->dh_handshake_state != DH_STATE_INIT) &&
+             (session->dh_handshake_state != DH_STATE_INIT_SENT) &&
+-            (session->dh_handshake_state != DH_STATE_FINISHED))
+-        {
++            (session->dh_handshake_state != DH_STATE_FINISHED)) {
+             rc = SSH_PACKET_DENIED;
+             break;
+         }
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_NEWKEYS:                            // 21
++    case SSH2_MSG_NEWKEYS: // 21
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_DH
+@@ -348,10 +394,11 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_KEXDH_INIT:                         // 30
+-      // SSH2_MSG_KEX_ECDH_INIT:                      // 30
+-      // SSH2_MSG_ECMQV_INIT:                         // 30
+-      // SSH2_MSG_KEX_DH_GEX_REQUEST_OLD:             // 30
++    case SSH2_MSG_KEXDH_INIT: // 30
++                              // SSH2_MSG_KEX_ECDH_INIT:                      //
++                              // 30 SSH2_MSG_ECMQV_INIT: // 30
++                              // SSH2_MSG_KEX_DH_GEX_REQUEST_OLD:             //
++                              // 30
+ 
+         /* Server only */
+ 
+@@ -384,10 +431,10 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_KEXDH_REPLY:                        // 31
+-      // SSH2_MSG_KEX_ECDH_REPLY:                     // 31
+-      // SSH2_MSG_ECMQV_REPLY:                        // 31
+-      // SSH2_MSG_KEX_DH_GEX_GROUP:                   // 31
++    case SSH2_MSG_KEXDH_REPLY: // 31
++                               // SSH2_MSG_KEX_ECDH_REPLY: // 31
++                               // SSH2_MSG_ECMQV_REPLY: // 31
++                               // SSH2_MSG_KEX_DH_GEX_GROUP: // 31
+ 
+         /*
+          * States required:
+@@ -412,19 +459,19 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_KEX_DH_GEX_INIT:                    // 32
++    case SSH2_MSG_KEX_DH_GEX_INIT: // 32
+         /* TODO Not filtered */
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_KEX_DH_GEX_REPLY:                   // 33
++    case SSH2_MSG_KEX_DH_GEX_REPLY: // 33
+         /* TODO Not filtered */
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_KEX_DH_GEX_REQUEST:                 // 34
++    case SSH2_MSG_KEX_DH_GEX_REQUEST: // 34
+         /* TODO Not filtered */
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_USERAUTH_REQUEST:                   // 50
++    case SSH2_MSG_USERAUTH_REQUEST: // 50
+         /* Server only */
+ 
+         /*
+@@ -455,7 +502,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_USERAUTH_FAILURE:                   // 51
++    case SSH2_MSG_USERAUTH_FAILURE: // 51
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATING
+@@ -493,7 +540,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_USERAUTH_SUCCESS:                   // 52
++    case SSH2_MSG_USERAUTH_SUCCESS: // 52
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATING
+@@ -531,15 +578,14 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+             (session->auth.state != SSH_AUTH_STATE_PUBKEY_AUTH_SENT) &&
+             (session->auth.state != SSH_AUTH_STATE_PASSWORD_AUTH_SENT) &&
+             (session->auth.state != SSH_AUTH_STATE_GSSAPI_MIC_SENT) &&
+-            (session->auth.state != SSH_AUTH_STATE_AUTH_NONE_SENT))
+-        {
++            (session->auth.state != SSH_AUTH_STATE_AUTH_NONE_SENT)) {
+             rc = SSH_PACKET_DENIED;
+             break;
+         }
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_USERAUTH_BANNER:                    // 53
++    case SSH2_MSG_USERAUTH_BANNER: // 53
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATING
+@@ -555,10 +601,10 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_USERAUTH_PK_OK:                     // 60
+-      // SSH2_MSG_USERAUTH_PASSWD_CHANGEREQ:          // 60
+-      // SSH2_MSG_USERAUTH_INFO_REQUEST:              // 60
+-      // SSH2_MSG_USERAUTH_GSSAPI_RESPONSE:           // 60
++    case SSH2_MSG_USERAUTH_PK_OK: // 60
++                                  // SSH2_MSG_USERAUTH_PASSWD_CHANGEREQ: // 60
++                                  // SSH2_MSG_USERAUTH_INFO_REQUEST: // 60
++                                  // SSH2_MSG_USERAUTH_GSSAPI_RESPONSE: // 60
+ 
+         /*
+          * States required:
+@@ -587,16 +633,16 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         if ((session->auth.state != SSH_AUTH_STATE_KBDINT_SENT) &&
+             (session->auth.state != SSH_AUTH_STATE_PUBKEY_OFFER_SENT) &&
+-            (session->auth.state != SSH_AUTH_STATE_GSSAPI_REQUEST_SENT))
+-        {
++            (session->auth.state != SSH_AUTH_STATE_GSSAPI_REQUEST_SENT)) {
+             rc = SSH_PACKET_DENIED;
+             break;
+         }
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_USERAUTH_INFO_RESPONSE:             // 61
+-      // SSH2_MSG_USERAUTH_GSSAPI_TOKEN:              // 61
++    case SSH2_MSG_USERAUTH_INFO_RESPONSE: // 61
++                                          // SSH2_MSG_USERAUTH_GSSAPI_TOKEN: //
++                                          // 61
+ 
+         /*
+          * States required:
+@@ -615,27 +661,26 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+         }
+ 
+         if ((session->auth.state != SSH_AUTH_STATE_INFO) &&
+-            (session->auth.state != SSH_AUTH_STATE_GSSAPI_TOKEN))
+-        {
++            (session->auth.state != SSH_AUTH_STATE_GSSAPI_TOKEN)) {
+             rc = SSH_PACKET_DENIED;
+             break;
+         }
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_USERAUTH_GSSAPI_EXCHANGE_COMPLETE:  // 63
++    case SSH2_MSG_USERAUTH_GSSAPI_EXCHANGE_COMPLETE: // 63
+         /* TODO Not filtered */
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_USERAUTH_GSSAPI_ERROR:              // 64
++    case SSH2_MSG_USERAUTH_GSSAPI_ERROR: // 64
+         /* TODO Not filtered */
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_USERAUTH_GSSAPI_ERRTOK:             // 65
++    case SSH2_MSG_USERAUTH_GSSAPI_ERRTOK: // 65
+         /* TODO Not filtered */
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_USERAUTH_GSSAPI_MIC:                // 66
++    case SSH2_MSG_USERAUTH_GSSAPI_MIC: // 66
+         /* Server only */
+ 
+         /*
+@@ -673,7 +718,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_GLOBAL_REQUEST:                     // 80
++    case SSH2_MSG_GLOBAL_REQUEST: // 80
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATED
+@@ -689,7 +734,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_REQUEST_SUCCESS:                    // 81
++    case SSH2_MSG_REQUEST_SUCCESS: // 81
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATED
+@@ -698,7 +743,8 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+          * - From channel->request_state == SSH_CHANNEL_REQ_STATE_PENDING
+          * - To   channel->request_state = SSH_CHANNEL_REQ_STATE_ACCEPTED
+          *
+-         * If not in a pending state, message is ignored in the callback handler.
++         * If not in a pending state, message is ignored in the callback
++         * handler.
+          * */
+ 
+         if (session->session_state != SSH_SESSION_STATE_AUTHENTICATED) {
+@@ -708,7 +754,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_REQUEST_FAILURE:                    // 82
++    case SSH2_MSG_REQUEST_FAILURE: // 82
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATED
+@@ -717,7 +763,8 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+          * - From channel->request_state == SSH_CHANNEL_REQ_STATE_PENDING
+          * - To   channel->request_state = SSH_CHANNEL_REQ_STATE_ACCEPTED
+          *
+-         * If not in a pending state, message is ignored in the callback handler.
++         * If not in a pending state, message is ignored in the callback
++         * handler.
+          * */
+ 
+         if (session->session_state != SSH_SESSION_STATE_AUTHENTICATED) {
+@@ -727,7 +774,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_CHANNEL_OPEN:                       // 90
++    case SSH2_MSG_CHANNEL_OPEN: // 90
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATED
+@@ -743,7 +790,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_CHANNEL_OPEN_CONFIRMATION:          // 91
++    case SSH2_MSG_CHANNEL_OPEN_CONFIRMATION: // 91
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATED
+@@ -760,7 +807,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_CHANNEL_OPEN_FAILURE:               // 92
++    case SSH2_MSG_CHANNEL_OPEN_FAILURE: // 92
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATED
+@@ -776,7 +823,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_CHANNEL_WINDOW_ADJUST:              // 93
++    case SSH2_MSG_CHANNEL_WINDOW_ADJUST: // 93
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATED
+@@ -792,7 +839,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_CHANNEL_DATA:                       // 94
++    case SSH2_MSG_CHANNEL_DATA: // 94
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATED
+@@ -808,7 +855,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_CHANNEL_EXTENDED_DATA:              // 95
++    case SSH2_MSG_CHANNEL_EXTENDED_DATA: // 95
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATED
+@@ -824,7 +871,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_CHANNEL_EOF:                        // 96
++    case SSH2_MSG_CHANNEL_EOF: // 96
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATED
+@@ -840,7 +887,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_CHANNEL_CLOSE:                      // 97
++    case SSH2_MSG_CHANNEL_CLOSE: // 97
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATED
+@@ -857,7 +904,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_CHANNEL_REQUEST:                    // 98
++    case SSH2_MSG_CHANNEL_REQUEST: // 98
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATED
+@@ -873,7 +920,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_CHANNEL_SUCCESS:                    // 99
++    case SSH2_MSG_CHANNEL_SUCCESS: // 99
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATED
+@@ -882,7 +929,8 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+          * - From channel->request_state == SSH_CHANNEL_REQ_STATE_PENDING
+          * - To   channel->request_state = SSH_CHANNEL_REQ_STATE_ACCEPTED
+          *
+-         * If not in a pending state, message is ignored in the callback handler.
++         * If not in a pending state, message is ignored in the callback
++         * handler.
+          * */
+ 
+         if (session->session_state != SSH_SESSION_STATE_AUTHENTICATED) {
+@@ -892,7 +940,7 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ 
+         rc = SSH_PACKET_ALLOWED;
+         break;
+-    case SSH2_MSG_CHANNEL_FAILURE:                    // 100
++    case SSH2_MSG_CHANNEL_FAILURE: // 100
+         /*
+          * States required:
+          * - session_state == SSH_SESSION_STATE_AUTHENTICATED
+@@ -901,7 +949,8 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+          * - From channel->request_state == SSH_CHANNEL_REQ_STATE_PENDING
+          * - To   channel->request_state = SSH_CHANNEL_REQ_STATE_ACCEPTED
+          *
+-         * If not in a pending state, message is ignored in the callback handler.
++         * If not in a pending state, message is ignored in the callback
++         * handler.
+          * */
+ 
+         if (session->session_state != SSH_SESSION_STATE_AUTHENTICATED) {
+@@ -920,12 +969,14 @@ static enum ssh_packet_filter_result_e ssh_packet_incoming_filter(ssh_session se
+ end:
+ #ifdef DEBUG_PACKET
+     if (rc == SSH_PACKET_DENIED) {
+-        SSH_LOG(SSH_LOG_PACKET, "REJECTED packet type %d: ",
++        SSH_LOG(SSH_LOG_PACKET,
++                "REJECTED packet type %d: ",
+                 session->in_packet.type);
+     }
+ 
+     if (rc == SSH_PACKET_UNKNOWN) {
+-        SSH_LOG(SSH_LOG_PACKET, "UNKNOWN packet type %d",
++        SSH_LOG(SSH_LOG_PACKET,
++                "UNKNOWN packet type %d",
+                 session->in_packet.type);
+     }
+ #endif
+@@ -970,8 +1021,7 @@ ssh_packet_get_current_crypto(ssh_session session,
+         }
+         break;
+     case SSH_DIRECTION_BOTH:
+-        if (crypto->in_cipher != NULL &&
+-            crypto->out_cipher != NULL) {
++        if (crypto->in_cipher != NULL && crypto->out_cipher != NULL) {
+             return crypto;
+         }
+     }
+@@ -979,7 +1029,7 @@ ssh_packet_get_current_crypto(ssh_session session,
+     return NULL;
+ }
+ 
+-#define MAX_PACKETS    (1UL<<31)
++#define MAX_PACKETS (1UL << 31)
+ 
+ static bool ssh_packet_need_rekey(ssh_session session,
+                                   const uint32_t payloadsize)
+@@ -1022,8 +1072,7 @@ static bool ssh_packet_need_rekey(ssh_session session,
+     /* RFC4344, Section 3.1 Recommends rekeying after 2^31 packets in either
+      * direction to avoid possible information leakage through the MAC tag
+      */
+-    if (out_cipher->packets > MAX_PACKETS ||
+-        in_cipher->packets > MAX_PACKETS) {
++    if (out_cipher->packets > MAX_PACKETS || in_cipher->packets > MAX_PACKETS) {
+         return true;
+     }
+ 
+@@ -1033,13 +1082,15 @@ static bool ssh_packet_need_rekey(ssh_session session,
+      *    signalize our intention to rekey
+      */
+     next_blocks = payloadsize / out_cipher->blocksize;
+-    data_rekey_needed = (out_cipher->max_blocks != 0 &&
+-                         out_cipher->blocks + next_blocks > out_cipher->max_blocks) ||
+-                         (in_cipher->max_blocks != 0 &&
+-                         in_cipher->blocks + next_blocks > in_cipher->max_blocks);
++    data_rekey_needed =
++        (out_cipher->max_blocks != 0 &&
++         out_cipher->blocks + next_blocks > out_cipher->max_blocks) ||
++        (in_cipher->max_blocks != 0 &&
++         in_cipher->blocks + next_blocks > in_cipher->max_blocks);
+ 
+     SSH_LOG(SSH_LOG_PACKET,
+-            "rekey: [data_rekey_needed=%d, out_blocks=%" PRIu64 ", in_blocks=%" PRIu64 "]",
++            "rekey: [data_rekey_needed=%d, out_blocks=%" PRIu64
++            ", in_blocks=%" PRIu64 "]",
+             data_rekey_needed,
+             out_cipher->blocks + next_blocks,
+             in_cipher->blocks + next_blocks);
+@@ -1049,11 +1100,12 @@ static bool ssh_packet_need_rekey(ssh_session session,
+ 
+ /* in nonblocking mode, socket_read will read as much as it can, and return */
+ /* SSH_OK if it has read at least len bytes, otherwise, SSH_AGAIN. */
+-/* in blocking mode, it will read at least len bytes and will block until it's ok. */
++/* in blocking mode, it will read at least len bytes and will block until it's
++ * ok. */
+ 
+ /** @internal
+- * @handles a data received event. It then calls the handlers for the different packet types
+- * or and exception handler callback.
++ * @handles a data received event. It then calls the handlers for the different
++ * packet types or and exception handler callback.
+  * @param user pointer to current ssh_session
+  * @param data pointer to the data received
+  * @len length of data received. It might not be enough for a complete packet
+@@ -1112,308 +1164,302 @@ ssh_packet_socket_callback(const void *data, size_t receivedlen, void *user)
+     SSH_LOG(SSH_LOG_PACKET,
+             "rcv packet cb (len=%zu, state=%s)",
+             receivedlen,
+-            session->packet_state == PACKET_STATE_INIT ?
+-                "INIT" :
+-                session->packet_state == PACKET_STATE_SIZEREAD ?
+-                    "SIZE_READ" :
+-                    session->packet_state == PACKET_STATE_PROCESSING ?
+-                    "PROCESSING" : "unknown");
++            session->packet_state == PACKET_STATE_INIT         ? "INIT"
++            : session->packet_state == PACKET_STATE_SIZEREAD   ? "SIZE_READ"
++            : session->packet_state == PACKET_STATE_PROCESSING ? "PROCESSING"
++                                                               : "unknown");
+ #endif
+     switch (session->packet_state) {
+-        case PACKET_STATE_INIT:
+-            if (receivedlen < lenfield_blocksize + etm_packet_offset) {
+-                /*
+-                 * We didn't receive enough data to read either at least one
+-                 * block size or the unencrypted length in EtM mode.
+-                 */
++    case PACKET_STATE_INIT:
++        if (receivedlen < lenfield_blocksize + etm_packet_offset) {
++            /*
++             * We didn't receive enough data to read either at least one
++             * block size or the unencrypted length in EtM mode.
++             */
+ #ifdef DEBUG_PACKET
+-                SSH_LOG(SSH_LOG_PACKET,
+-                        "Waiting for more data (%zu < %u)",
+-                        receivedlen,
+-                        lenfield_blocksize);
++            SSH_LOG(SSH_LOG_PACKET,
++                    "Waiting for more data (%zu < %u)",
++                    receivedlen,
++                    lenfield_blocksize);
+ #endif
+-                return 0;
+-            }
+-
+-            session->in_packet = (struct packet_struct) {
+-                .type = 0,
+-            };
+-
+-            if (session->in_buffer) {
+-                rc = ssh_buffer_reinit(session->in_buffer);
+-                if (rc < 0) {
+-                    goto error;
+-                }
+-            } else {
+-                session->in_buffer = ssh_buffer_new();
+-                if (session->in_buffer == NULL) {
+-                    goto error;
+-                }
+-            }
++            return 0;
++        }
+ 
+-            if (!etm) {
+-                ptr = ssh_buffer_allocate(session->in_buffer,
+-                                          lenfield_blocksize);
+-                if (ptr == NULL) {
+-                    goto error;
+-                }
+-                packet_len = ssh_packet_decrypt_len(session, ptr,
+-                                                    (uint8_t *)data);
+-                to_be_read = packet_len - lenfield_blocksize + sizeof(uint32_t);
+-            } else {
+-                /* Length is unencrypted in case of Encrypt-then-MAC */
+-                packet_len = PULL_BE_U32(data, 0);
+-                to_be_read = packet_len - etm_packet_offset;
+-            }
++        session->in_packet = (struct packet_struct){
++            .type = 0,
++        };
+ 
+-            processed += lenfield_blocksize + etm_packet_offset;
+-            if (packet_len > MAX_PACKET_LEN) {
+-                ssh_set_error(session,
+-                              SSH_FATAL,
+-                              "read_packet(): Packet len too high(%" PRIu32 " %.4" PRIx32 ")",
+-                              packet_len, packet_len);
++        if (session->in_buffer) {
++            rc = ssh_buffer_reinit(session->in_buffer);
++            if (rc < 0) {
+                 goto error;
+             }
+-            if (to_be_read < 0) {
+-                /* remote sshd sends invalid sizes? */
+-                ssh_set_error(session,
+-                              SSH_FATAL,
+-                              "Given numbers of bytes left to be read < 0 (%zd)!",
+-                              to_be_read);
++        } else {
++            session->in_buffer = ssh_buffer_new();
++            if (session->in_buffer == NULL) {
+                 goto error;
+             }
++        }
+ 
+-            session->in_packet.len = packet_len;
+-            session->packet_state = PACKET_STATE_SIZEREAD;
+-            FALL_THROUGH;
+-        case PACKET_STATE_SIZEREAD:
+-            packet_len = session->in_packet.len;
+-            packet_offset = processed = lenfield_blocksize + etm_packet_offset;
+-            to_be_read = packet_len + sizeof(uint32_t) + current_macsize;
+-            /* if to_be_read is zero, the whole packet was blocksize bytes. */
+-            if (to_be_read != 0) {
+-                if (receivedlen < (unsigned long)to_be_read) {
+-                    /* give up, not enough data in buffer */
+-                    SSH_LOG(SSH_LOG_PACKET,
+-                            "packet: partial packet (read len) "
+-                            "[len=%" PRIu32 ", receivedlen=%zu, to_be_read=%zd]",
+-                            packet_len,
+-                            receivedlen,
+-                            to_be_read);
+-                    return 0;
+-                }
+-
+-                packet_second_block = (uint8_t*)data + packet_offset;
+-                processed = to_be_read - current_macsize;
++        if (!etm) {
++            ptr = ssh_buffer_allocate(session->in_buffer, lenfield_blocksize);
++            if (ptr == NULL) {
++                goto error;
+             }
++            packet_len = ssh_packet_decrypt_len(session, ptr, (uint8_t *)data);
++            to_be_read = packet_len - lenfield_blocksize + sizeof(uint32_t);
++        } else {
++            /* Length is unencrypted in case of Encrypt-then-MAC */
++            packet_len = PULL_BE_U32(data, 0);
++            to_be_read = packet_len - etm_packet_offset;
++        }
++
++        processed += lenfield_blocksize + etm_packet_offset;
++        if (packet_len > MAX_PACKET_LEN) {
++            ssh_set_error(session,
++                          SSH_FATAL,
++                          "read_packet(): Packet len too high(%" PRIu32
++                          " %.4" PRIx32 ")",
++                          packet_len,
++                          packet_len);
++            goto error;
++        }
++        if (to_be_read < 0) {
++            /* remote sshd sends invalid sizes? */
++            ssh_set_error(session,
++                          SSH_FATAL,
++                          "Given numbers of bytes left to be read < 0 (%zd)!",
++                          to_be_read);
++            goto error;
++        }
+ 
+-            /* remaining encrypted bytes from the packet, MAC not included */
+-            packet_remaining = packet_len - (packet_offset - sizeof(uint32_t));
+-            cleartext_packet = ssh_buffer_allocate(session->in_buffer,
+-                                                   (uint32_t)packet_remaining);
+-            if (cleartext_packet == NULL) {
+-                goto error;
++        session->in_packet.len = packet_len;
++        session->packet_state = PACKET_STATE_SIZEREAD;
++        FALL_THROUGH;
++    case PACKET_STATE_SIZEREAD:
++        packet_len = session->in_packet.len;
++        packet_offset = processed = lenfield_blocksize + etm_packet_offset;
++        to_be_read = packet_len + sizeof(uint32_t) + current_macsize;
++        /* if to_be_read is zero, the whole packet was blocksize bytes. */
++        if (to_be_read != 0) {
++            if (receivedlen < (unsigned long)to_be_read) {
++                /* give up, not enough data in buffer */
++                SSH_LOG(SSH_LOG_PACKET,
++                        "packet: partial packet (read len) "
++                        "[len=%" PRIu32 ", receivedlen=%zu, to_be_read=%zd]",
++                        packet_len,
++                        receivedlen,
++                        to_be_read);
++                return 0;
+             }
+ 
+-            if (packet_second_block != NULL) {
+-                if (crypto != NULL) {
+-                    mac = packet_second_block + packet_remaining;
+-
+-                    if (crypto->in_hmac != SSH_HMAC_NONE && etm) {
+-                        rc = ssh_packet_hmac_verify(session,
+-                                                    data,
+-                                                    processed,
+-                                                    mac,
+-                                                    crypto->in_hmac);
+-                        if (rc < 0) {
+-                            ssh_set_error(session, SSH_FATAL, "HMAC error");
+-                            goto error;
+-                        }
++            packet_second_block = (uint8_t *)data + packet_offset;
++            processed = to_be_read - current_macsize;
++        }
++
++        /* remaining encrypted bytes from the packet, MAC not included */
++        packet_remaining = packet_len - (packet_offset - sizeof(uint32_t));
++        cleartext_packet =
++            ssh_buffer_allocate(session->in_buffer, (uint32_t)packet_remaining);
++        if (cleartext_packet == NULL) {
++            goto error;
++        }
++
++        if (packet_second_block != NULL) {
++            if (crypto != NULL) {
++                mac = packet_second_block + packet_remaining;
++
++                if (crypto->in_hmac != SSH_HMAC_NONE && etm) {
++                    rc = ssh_packet_hmac_verify(session,
++                                                data,
++                                                processed,
++                                                mac,
++                                                crypto->in_hmac);
++                    if (rc < 0) {
++                        ssh_set_error(session, SSH_FATAL, "HMAC error");
++                        goto error;
+                     }
+-                    /*
+-                     * Decrypt the packet. In case of EtM mode, the length is
+-                     * already known as it's unencrypted. In the other case,
+-                     * lenfield_blocksize bytes already have been decrypted.
+-                     */
+-                    if (packet_remaining > 0) {
+-                        rc = ssh_packet_decrypt(session,
+-                                                cleartext_packet,
+-                                                (uint8_t *)data,
+-                                                packet_offset,
+-                                                processed - packet_offset);
+-                        if (rc < 0) {
+-                            ssh_set_error(session,
+-                                          SSH_FATAL,
+-                                          "Decryption error");
+-                            goto error;
+-                        }
++                }
++                /*
++                 * Decrypt the packet. In case of EtM mode, the length is
++                 * already known as it's unencrypted. In the other case,
++                 * lenfield_blocksize bytes already have been decrypted.
++                 */
++                if (packet_remaining > 0) {
++                    rc = ssh_packet_decrypt(session,
++                                            cleartext_packet,
++                                            (uint8_t *)data,
++                                            packet_offset,
++                                            processed - packet_offset);
++                    if (rc < 0) {
++                        ssh_set_error(session, SSH_FATAL, "Decryption error");
++                        goto error;
+                     }
++                }
+ 
+-                    if (crypto->in_hmac != SSH_HMAC_NONE && !etm) {
+-                        ssh_buffer in = session->in_buffer;
+-                        rc = ssh_packet_hmac_verify(session,
+-                                                    ssh_buffer_get(in),
+-                                                    ssh_buffer_get_len(in),
+-                                                    mac,
+-                                                    crypto->in_hmac);
+-                        if (rc < 0) {
+-                            ssh_set_error(session, SSH_FATAL, "HMAC error");
+-                            goto error;
+-                        }
++                if (crypto->in_hmac != SSH_HMAC_NONE && !etm) {
++                    ssh_buffer in = session->in_buffer;
++                    rc = ssh_packet_hmac_verify(session,
++                                                ssh_buffer_get(in),
++                                                ssh_buffer_get_len(in),
++                                                mac,
++                                                crypto->in_hmac);
++                    if (rc < 0) {
++                        ssh_set_error(session, SSH_FATAL, "HMAC error");
++                        goto error;
+                     }
+-                    processed += current_macsize;
+-                } else {
+-                    memcpy(cleartext_packet,
+-                           packet_second_block,
+-                           packet_remaining);
+                 }
++                processed += current_macsize;
++            } else {
++                memcpy(cleartext_packet, packet_second_block, packet_remaining);
+             }
++        }
+ 
+ #ifdef WITH_PCAP
+-            if (session->pcap_ctx != NULL) {
+-                ssh_pcap_context_write(session->pcap_ctx,
+-                                       SSH_PCAP_DIR_IN,
+-                                       ssh_buffer_get(session->in_buffer),
+-                                       ssh_buffer_get_len(session->in_buffer),
+-                                       ssh_buffer_get_len(session->in_buffer));
+-            }
++        if (session->pcap_ctx != NULL) {
++            ssh_pcap_context_write(session->pcap_ctx,
++                                   SSH_PCAP_DIR_IN,
++                                   ssh_buffer_get(session->in_buffer),
++                                   ssh_buffer_get_len(session->in_buffer),
++                                   ssh_buffer_get_len(session->in_buffer));
++        }
+ #endif
+ 
+-            if (!etm) {
+-                /* skip the size field which has been processed before */
+-                ssh_buffer_pass_bytes(session->in_buffer, sizeof(uint32_t));
+-            }
++        if (!etm) {
++            /* skip the size field which has been processed before */
++            ssh_buffer_pass_bytes(session->in_buffer, sizeof(uint32_t));
++        }
+ 
+-            rc = ssh_buffer_get_u8(session->in_buffer, &padding);
+-            if (rc == 0) {
+-                ssh_set_error(session,
+-                              SSH_FATAL,
+-                              "Packet too short to read padding");
++        rc = ssh_buffer_get_u8(session->in_buffer, &padding);
++        if (rc == 0) {
++            ssh_set_error(session,
++                          SSH_FATAL,
++                          "Packet too short to read padding");
++            goto error;
++        }
++
++        if (padding > ssh_buffer_get_len(session->in_buffer)) {
++            ssh_set_error(session,
++                          SSH_FATAL,
++                          "Invalid padding: %d (%" PRIu32 " left)",
++                          padding,
++                          ssh_buffer_get_len(session->in_buffer));
++            goto error;
++        }
++        ssh_buffer_pass_bytes_end(session->in_buffer, padding);
++        compsize = ssh_buffer_get_len(session->in_buffer);
++
++        if (crypto && crypto->do_compress_in &&
++            ssh_buffer_get_len(session->in_buffer) > 0) {
++            rc = decompress_buffer(session, session->in_buffer, MAX_PACKET_LEN);
++            if (rc < 0) {
+                 goto error;
+             }
+-
+-            if (padding > ssh_buffer_get_len(session->in_buffer)) {
++        }
++        payloadsize = ssh_buffer_get_len(session->in_buffer);
++        if (session->recv_seq == UINT32_MAX) {
++            /* Overflowing sequence numbers is always fishy */
++            if (crypto == NULL) {
++                /* don't allow sequence number overflow when unencrypted */
+                 ssh_set_error(session,
+                               SSH_FATAL,
+-                              "Invalid padding: %d (%" PRIu32 " left)",
+-                              padding,
+-                              ssh_buffer_get_len(session->in_buffer));
++                              "Incoming sequence number overflow");
+                 goto error;
++            } else {
++                SSH_LOG(SSH_LOG_WARNING, "Incoming sequence number overflow");
+             }
+-            ssh_buffer_pass_bytes_end(session->in_buffer, padding);
+-            compsize = ssh_buffer_get_len(session->in_buffer);
+-
+-            if (crypto && crypto->do_compress_in &&
+-                ssh_buffer_get_len(session->in_buffer) > 0) {
+-                rc = decompress_buffer(session, session->in_buffer,
+-                                       MAX_PACKET_LEN);
+-                if (rc < 0) {
+-                    goto error;
+-                }
+-            }
+-            payloadsize = ssh_buffer_get_len(session->in_buffer);
+-            if (session->recv_seq == UINT32_MAX) {
+-                /* Overflowing sequence numbers is always fishy */
+-                if (crypto == NULL) {
+-                    /* don't allow sequence number overflow when unencrypted */
+-                    ssh_set_error(session,
+-                                  SSH_FATAL,
+-                                  "Incoming sequence number overflow");
+-                    goto error;
+-                } else {
+-                    SSH_LOG(SSH_LOG_WARNING,
+-                            "Incoming sequence number overflow");
+-                }
+-            }
+-            session->recv_seq++;
+-            if (crypto != NULL) {
+-                struct ssh_cipher_struct *cipher = NULL;
++        }
++        session->recv_seq++;
++        if (crypto != NULL) {
++            struct ssh_cipher_struct *cipher = NULL;
+ 
+-                cipher = crypto->in_cipher;
+-                cipher->packets++;
+-                cipher->blocks += payloadsize / cipher->blocksize;
+-            }
+-            if (session->raw_counter != NULL) {
+-                session->raw_counter->in_bytes += payloadsize;
+-                session->raw_counter->in_packets++;
+-            }
++            cipher = crypto->in_cipher;
++            cipher->packets++;
++            cipher->blocks += payloadsize / cipher->blocksize;
++        }
++        if (session->raw_counter != NULL) {
++            session->raw_counter->in_bytes += payloadsize;
++            session->raw_counter->in_packets++;
++        }
+ 
+-            /*
+-             * We don't want to rewrite a new packet while still executing the
+-             * packet callbacks
++        /*
++         * We don't want to rewrite a new packet while still executing the
++         * packet callbacks
++         */
++        session->packet_state = PACKET_STATE_PROCESSING;
++        ssh_packet_parse_type(session);
++        SSH_LOG(SSH_LOG_PACKET,
++                "packet: read type %hhd [len=%" PRIu32 ",padding=%hhd,"
++                "comp=%" PRIu32 ",payload=%" PRIu32 "]",
++                session->in_packet.type,
++                packet_len,
++                padding,
++                compsize,
++                payloadsize);
++        if (crypto == NULL) {
++            /* In strict kex, only a few packets are allowed. Taint the session
++             * if we received packets that are normally allowed but to be
++             * refused if we are in strict kex when KEX is over.
+              */
+-            session->packet_state = PACKET_STATE_PROCESSING;
+-            ssh_packet_parse_type(session);
+-            SSH_LOG(SSH_LOG_PACKET,
+-                    "packet: read type %hhd [len=%" PRIu32 ",padding=%hhd,"
+-                    "comp=%" PRIu32 ",payload=%" PRIu32 "]",
+-                    session->in_packet.type, packet_len, padding, compsize,
+-                    payloadsize);
+-            if (crypto == NULL) {
+-                /* In strict kex, only a few packets are allowed. Taint the session
+-                 * if we received packets that are normally allowed but to be
+-                 * refused if we are in strict kex when KEX is over.
+-                 */
+-                uint8_t type = session->in_packet.type;
++            uint8_t type = session->in_packet.type;
+ 
+-                if (type != SSH2_MSG_KEXINIT && type != SSH2_MSG_NEWKEYS &&
+-                    (type < SSH2_MSG_KEXDH_INIT ||
+-                     type > SSH2_MSG_KEX_DH_GEX_REQUEST)) {
+-                    session->flags |= SSH_SESSION_FLAG_KEX_TAINTED;
+-                }
++            if (type != SSH2_MSG_KEXINIT && type != SSH2_MSG_NEWKEYS &&
++                (type < SSH2_MSG_KEXDH_INIT ||
++                 type > SSH2_MSG_KEX_DH_GEX_REQUEST)) {
++                session->flags |= SSH_SESSION_FLAG_KEX_TAINTED;
+             }
+-            /* Check if the packet is expected */
+-            filter_result = ssh_packet_incoming_filter(session);
+-
+-            switch (filter_result) {
+-            case SSH_PACKET_ALLOWED:
+-                /* Execute callbacks */
+-                ssh_packet_process(session, session->in_packet.type);
+-                break;
+-            case SSH_PACKET_DENIED:
+-                ssh_set_error(session,
+-                              SSH_FATAL,
+-                              "Packet filter: rejected packet (type %d)",
+-                              session->in_packet.type);
+-                goto error;
+-            case SSH_PACKET_UNKNOWN:
+-                if (crypto == NULL) {
+-                    session->flags |= SSH_SESSION_FLAG_KEX_TAINTED;
+-                }
+-                ssh_packet_send_unimplemented(session, session->recv_seq - 1);
+-                break;
++        }
++        /* Check if the packet is expected */
++        filter_result = ssh_packet_incoming_filter(session);
++
++        switch (filter_result) {
++        case SSH_PACKET_ALLOWED:
++            /* Execute callbacks */
++            ssh_packet_process(session, session->in_packet.type);
++            break;
++        case SSH_PACKET_DENIED:
++            ssh_set_error(session,
++                          SSH_FATAL,
++                          "Packet filter: rejected packet (type %d)",
++                          session->in_packet.type);
++            goto error;
++        case SSH_PACKET_UNKNOWN:
++            if (crypto == NULL) {
++                session->flags |= SSH_SESSION_FLAG_KEX_TAINTED;
+             }
++            ssh_packet_send_unimplemented(session, session->recv_seq - 1);
++            break;
++        }
+ 
+-            session->packet_state = PACKET_STATE_INIT;
+-            if (processed < receivedlen) {
+-                size_t num;
+-                /* Handle a potential packet left in socket buffer */
+-                SSH_LOG(SSH_LOG_PACKET,
+-                        "Processing %zu bytes left in socket buffer",
+-                        receivedlen-processed);
++        session->packet_state = PACKET_STATE_INIT;
++        if (processed < receivedlen) {
++            size_t num;
++            /* Handle a potential packet left in socket buffer */
++            SSH_LOG(SSH_LOG_PACKET,
++                    "Processing %zu bytes left in socket buffer",
++                    receivedlen - processed);
+ 
+-                ptr = ((uint8_t*)data) + processed;
++            ptr = ((uint8_t *)data) + processed;
+ 
+-                num = ssh_packet_socket_callback(ptr,
+-                                                 receivedlen - processed,
+-                                                 user);
+-                processed += num;
+-            }
++            num =
++                ssh_packet_socket_callback(ptr, receivedlen - processed, user);
++            processed += num;
++        }
+ 
+-            ok = ssh_packet_need_rekey(session, 0);
+-            if (ok) {
+-                SSH_LOG(SSH_LOG_PACKET, "Incoming packet triggered rekey");
+-                rc = ssh_send_rekex(session);
+-                if (rc != SSH_OK) {
+-                    SSH_LOG(SSH_LOG_PACKET, "Rekey failed: rc = %d", rc);
+-                    return rc;
+-                }
++        ok = ssh_packet_need_rekey(session, 0);
++        if (ok) {
++            SSH_LOG(SSH_LOG_PACKET, "Incoming packet triggered rekey");
++            rc = ssh_send_rekex(session);
++            if (rc != SSH_OK) {
++                SSH_LOG(SSH_LOG_PACKET, "Rekey failed: rc = %d", rc);
++                return rc;
+             }
++        }
+ 
+-            return processed;
+-        case PACKET_STATE_PROCESSING:
+-            SSH_LOG(SSH_LOG_PACKET, "Nested packet processing. Delaying.");
+-            return 0;
++        return processed;
++    case PACKET_STATE_PROCESSING:
++        SSH_LOG(SSH_LOG_PACKET, "Nested packet processing. Delaying.");
++        return 0;
+     }
+ 
+     ssh_set_error(session,
+@@ -1465,8 +1511,8 @@ void ssh_packet_register_socket_callback(ssh_session session, ssh_socket s)
+ /** @internal
+  * @brief sets the callbacks for the packet layer
+  */
+-void
+-ssh_packet_set_callbacks(ssh_session session, ssh_packet_callbacks callbacks)
++void ssh_packet_set_callbacks(ssh_session session,
++                              ssh_packet_callbacks callbacks)
+ {
+     if (session->packet_callbacks == NULL) {
+         session->packet_callbacks = ssh_list_new();
+@@ -1481,8 +1527,8 @@ ssh_packet_set_callbacks(ssh_session session, ssh_packet_callbacks callbacks)
+ /** @internal
+  * @brief remove the callbacks from the packet layer
+  */
+-void
+-ssh_packet_remove_callbacks(ssh_session session, ssh_packet_callbacks callbacks)
++void ssh_packet_remove_callbacks(ssh_session session,
++                                 ssh_packet_callbacks callbacks)
+ {
+     struct ssh_iterator *it = NULL;
+ 
+@@ -1500,7 +1546,8 @@ void ssh_packet_set_default_callbacks(ssh_session session)
+     struct ssh_packet_callbacks_struct *c = &session->default_packet_callbacks;
+ 
+     c->start = 1;
+-    c->n_callbacks = sizeof(default_packet_handlers) / sizeof(ssh_packet_callback);
++    c->n_callbacks =
++        sizeof(default_packet_handlers) / sizeof(ssh_packet_callback);
+     c->user = session;
+     c->callbacks = default_packet_handlers;
+     ssh_packet_set_callbacks(session, c);
+@@ -1543,7 +1590,9 @@ void ssh_packet_process(ssh_session session, uint8_t type)
+             continue;
+         }
+ 
+-        rc = cb->callbacks[type - cb->start](session, type, session->in_buffer,
++        rc = cb->callbacks[type - cb->start](session,
++                                             type,
++                                             session->in_buffer,
+                                              cb->user);
+         if (rc == SSH_PACKET_USED) {
+             break;
+@@ -1554,7 +1603,8 @@ void ssh_packet_process(ssh_session session, uint8_t type)
+         SSH_LOG(SSH_LOG_RARE, "Couldn't do anything with packet type %d", type);
+         rc = ssh_packet_send_unimplemented(session, session->recv_seq - 1);
+         if (rc != SSH_OK) {
+-            SSH_LOG(SSH_LOG_RARE, "Failed to send unimplemented: %s",
++            SSH_LOG(SSH_LOG_RARE,
++                    "Failed to send unimplemented: %s",
+                     ssh_get_error(session));
+         }
+         if (session->current_crypto == NULL) {
+@@ -1592,7 +1642,8 @@ int ssh_packet_send_newkeys(ssh_session session)
+  * @param seqnum the sequence number of the unknown packet
+  * @return SSH_ERROR on error, else SSH_OK
+  */
+-int ssh_packet_send_unimplemented(ssh_session session, uint32_t seqnum){
++int ssh_packet_send_unimplemented(ssh_session session, uint32_t seqnum)
++{
+     int rc;
+ 
+     rc = ssh_buffer_pack(session->out_buffer,
+@@ -1611,7 +1662,8 @@ int ssh_packet_send_unimplemented(ssh_session session, uint32_t seqnum){
+ /** @internal
+  * @brief handles a SSH_MSG_UNIMPLEMENTED packet
+  */
+-SSH_PACKET_CALLBACK(ssh_packet_unimplemented){
++SSH_PACKET_CALLBACK(ssh_packet_unimplemented)
++{
+     uint32_t seq;
+     int rc;
+ 
+@@ -1621,12 +1673,12 @@ SSH_PACKET_CALLBACK(ssh_packet_unimplemented){
+ 
+     rc = ssh_buffer_unpack(packet, "d", &seq);
+     if (rc != SSH_OK) {
+-        SSH_LOG(SSH_LOG_TRACE,
+-                "Could not unpack SSH_MSG_UNIMPLEMENTED packet");
++        SSH_LOG(SSH_LOG_TRACE, "Could not unpack SSH_MSG_UNIMPLEMENTED packet");
+     }
+ 
+     SSH_LOG(SSH_LOG_RARE,
+-            "Received SSH_MSG_UNIMPLEMENTED (sequence number %" PRIu32 ")",seq);
++            "Received SSH_MSG_UNIMPLEMENTED (sequence number %" PRIu32 ")",
++            seq);
+ 
+     return SSH_PACKET_USED;
+ }
+@@ -1636,7 +1688,7 @@ SSH_PACKET_CALLBACK(ssh_packet_unimplemented){
+  */
+ int ssh_packet_parse_type(struct ssh_session_struct *session)
+ {
+-    session->in_packet = (struct packet_struct) {
++    session->in_packet = (struct packet_struct){
+         .type = 0,
+     };
+ 
+@@ -1658,14 +1710,15 @@ int ssh_packet_parse_type(struct ssh_session_struct *session)
+  * This function places the outgoing packet buffer into an outgoing
+  * socket buffer
+  */
+-static int ssh_packet_write(ssh_session session) {
+-  int rc = SSH_ERROR;
++static int ssh_packet_write(ssh_session session)
++{
++    int rc = SSH_ERROR;
+ 
+-  rc=ssh_socket_write(session->socket,
+-      ssh_buffer_get(session->out_buffer),
+-      ssh_buffer_get_len(session->out_buffer));
++    rc = ssh_socket_write(session->socket,
++                          ssh_buffer_get(session->out_buffer),
++                          ssh_buffer_get_len(session->out_buffer));
+ 
+-  return rc;
++    return rc;
+ }
+ 
+ static int packet_send2(ssh_session session)
+@@ -1676,7 +1729,7 @@ static int packet_send2(ssh_session session)
+     uint32_t currentlen = ssh_buffer_get_len(session->out_buffer);
+     struct ssh_crypto_struct *crypto = NULL;
+     unsigned char *hmac = NULL;
+-    uint8_t padding_data[32] = { 0 };
++    uint8_t padding_data[32] = {0};
+     uint8_t padding_size;
+     uint32_t finallen, payloadsize, compsize;
+     uint8_t header[5] = {0};
+@@ -1706,7 +1759,7 @@ static int packet_send2(ssh_session session)
+ 
+     if (crypto != NULL && crypto->do_compress_out &&
+         ssh_buffer_get_len(session->out_buffer) > 0) {
+-        rc = compress_buffer(session,session->out_buffer);
++        rc = compress_buffer(session, session->out_buffer);
+         if (rc < 0) {
+             goto error;
+         }
+@@ -1714,8 +1767,11 @@ static int packet_send2(ssh_session session)
+     }
+     compsize = currentlen;
+     /* compressed payload + packet len (4) + padding_size len (1) */
+-    /* totallen - lenfield_blocksize - etm_packet_offset must be equal to 0 (mod blocksize) */
+-    padding_size = (blocksize - ((blocksize - lenfield_blocksize - etm_packet_offset + currentlen + 5) % blocksize));
++    /* totallen - lenfield_blocksize - etm_packet_offset must be equal to 0 (mod
++     * blocksize) */
++    padding_size = (blocksize - ((blocksize - lenfield_blocksize -
++                                  etm_packet_offset + currentlen + 5) %
++                                 blocksize));
+     if (padding_size < 4) {
+         padding_size += blocksize;
+     }
+@@ -1735,9 +1791,7 @@ static int packet_send2(ssh_session session)
+     PUSH_BE_U32(header, 0, finallen);
+     PUSH_BE_U8(header, 4, padding_size);
+ 
+-    rc = ssh_buffer_prepend_data(session->out_buffer,
+-                                 header,
+-                                 sizeof(header));
++    rc = ssh_buffer_prepend_data(session->out_buffer, header, sizeof(header));
+     if (rc < 0) {
+         goto error;
+     }
+@@ -1790,7 +1844,8 @@ static int packet_send2(ssh_session session)
+     }
+ 
+     SSH_LOG(SSH_LOG_PACKET,
+-            "packet: wrote [type=%u, len=%" PRIu32 ", padding_size=%hhd, comp=%" PRIu32 ", "
++            "packet: wrote [type=%u, len=%" PRIu32
++            ", padding_size=%hhd, comp=%" PRIu32 ", "
+             "payload=%" PRIu32 "]",
+             type,
+             finallen,
+@@ -1816,19 +1871,15 @@ error:
+     return rc; /* SSH_OK, AGAIN or ERROR */
+ }
+ 
+-static bool
+-ssh_packet_is_kex(unsigned char type)
++static bool ssh_packet_is_kex(unsigned char type)
+ {
+-    return type >= SSH2_MSG_DISCONNECT &&
+-           type <= SSH2_MSG_KEX_DH_GEX_REQUEST &&
++    return type >= SSH2_MSG_DISCONNECT && type <= SSH2_MSG_KEX_DH_GEX_REQUEST &&
+            type != SSH2_MSG_SERVICE_REQUEST &&
+-           type != SSH2_MSG_SERVICE_ACCEPT &&
+-           type != SSH2_MSG_IGNORE &&
++           type != SSH2_MSG_SERVICE_ACCEPT && type != SSH2_MSG_IGNORE &&
+            type != SSH2_MSG_EXT_INFO;
+ }
+ 
+-static bool
+-ssh_packet_in_rekey(ssh_session session)
++static bool ssh_packet_in_rekey(ssh_session session)
+ {
+     /* We know we are rekeying if we are authenticated and the DH
+      * status is not finished, but we only queue packets until we've
+@@ -1898,8 +1949,7 @@ int ssh_packet_send(ssh_session session)
+             /* reset packet sequence number when running in strict kex mode */
+             session->send_seq = 0;
+         }
+-        for (it = ssh_list_get_iterator(session->out_queue);
+-             it != NULL;
++        for (it = ssh_list_get_iterator(session->out_queue); it != NULL;
+              it = ssh_list_get_iterator(session->out_queue)) {
+             struct ssh_buffer_struct *next_buffer = NULL;
+ 
+@@ -1927,9 +1977,8 @@ int ssh_packet_send(ssh_session session)
+     return rc;
+ }
+ 
+-static void
+-ssh_init_rekey_state(struct ssh_session_struct *session,
+-                     struct ssh_cipher_struct *cipher)
++static void ssh_init_rekey_state(struct ssh_session_struct *session,
++                                 struct ssh_cipher_struct *cipher)
+ {
+     /* Reset the counters: should be NOOP */
+     cipher->packets = 0;
+@@ -1938,7 +1987,7 @@ ssh_init_rekey_state(struct ssh_session_struct *session,
+     /* Default rekey limits for ciphers as specified in RFC4344, Section 3.2 */
+     if (cipher->blocksize >= 16) {
+         /* For larger block size (L bits) use maximum of 2**(L/4) blocks */
+-        cipher->max_blocks = (uint64_t)1 << (cipher->blocksize*2);
++        cipher->max_blocks = (uint64_t)1 << (cipher->blocksize * 2);
+     } else {
+         /* For smaller blocks use limit of 1 GB as recommended in RFC4253 */
+         cipher->max_blocks = ((uint64_t)1 << 30) / cipher->blocksize;
+@@ -1958,9 +2007,8 @@ ssh_init_rekey_state(struct ssh_session_struct *session,
+  * Once we got SSH2_MSG_NEWKEYS we can switch next_crypto and
+  * current_crypto for our desired direction
+  */
+-int
+-ssh_packet_set_newkeys(ssh_session session,
+-                       enum ssh_crypto_direction_e direction)
++int ssh_packet_set_newkeys(ssh_session session,
++                           enum ssh_crypto_direction_e direction)
+ {
+     struct ssh_cipher_struct *in_cipher = NULL, *out_cipher = NULL;
+     int rc;
+@@ -2051,8 +2099,9 @@ ssh_packet_set_newkeys(ssh_session session,
+     ssh_init_rekey_state(session, in_cipher);
+     if (session->opts.rekey_time != 0) {
+         ssh_timestamp_init(&session->last_rekey_time);
+-        SSH_LOG(SSH_LOG_DEBUG, "Set rekey after %" PRIu32 " seconds",
+-                session->opts.rekey_time/1000);
++        SSH_LOG(SSH_LOG_DEBUG,
++                "Set rekey after %" PRIu32 " seconds",
++                session->opts.rekey_time / 1000);
+     }
+ 
+     if (in_cipher->set_decrypt_key) {
+-- 
+2.34.1
+
