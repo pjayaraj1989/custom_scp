@@ -22,8 +22,8 @@ const char *rsa_key = "server_rsa_key"; // make sure this key file exists
 const char *received_file = "received_file";
 int port = 8443;
 
-const char *user = "amd";
-const char *password = "amd@123";
+const char *user = "myusername";
+const char *password = "mypassword";
 const char *local_file = "file.txt";
 const char *host = "localhost";
 
