@@ -1,7 +1,114 @@
 #include <openssl/evp.h>
+#include <openssl/err.h>
 #include <openssl/rand.h>
 #include <vector>
 #include <iostream>
+
+void handleErrors(void)
+{
+    ERR_print_errors_fp(stderr);
+    abort();
+}
+
+int encrypt_aes_openssl(const uint8_t *plaintext, int plaintext_len,
+                        const uint8_t *key, uint8_t *iv,
+                        std::vector<uint8_t> &ciphertext)
+{
+    int ciphertext_len = 0;
+    EVP_CIPHER_CTX *ctx;
+    int len;
+    // Create and initialize the context
+    if (!(ctx = EVP_CIPHER_CTX_new()))
+    {
+        std::cout << "Error creating context" << std::endl;
+        return -1;
+    }
+
+    // Initialize the encryption operation
+    if (1 != EVP_EncryptInit_ex(ctx, EVP_aes_128_ctr(), NULL, key, iv))
+    {
+        std::cout << "Error initializing encryption" << std::endl;
+        return -1;
+    }
+
+    if (1 != EVP_CIPHER_CTX_set_padding(ctx, 0))
+    {
+        std::cout << "Error setting padding" << std::endl;
+        return -1;
+    }
+
+    // Allocate memory for ciphertext
+    ciphertext.resize(plaintext_len);
+    // Encrypt plaintext
+
+    if (1 != EVP_EncryptUpdate(ctx, ciphertext.data(), &len, plaintext, ciphertext.size()))
+    {
+        std::cout << "Error encrypting data" << std::endl;
+        return -1;
+    }
+    ciphertext_len = len;
+    //  Finalize encryption
+    if (1 != EVP_CipherFinal_ex(ctx, ciphertext.data() + len, &len))
+    {
+        std::cout << "Error finalizing encryption" << std::endl;
+        return -1;
+    }
+    ciphertext_len += len;
+    //  Clean up
+    EVP_CIPHER_CTX_free(ctx);
+    // std::cout << "Encryption successful, cipher text len " << ciphertext_len << std::endl;
+
+    return ciphertext_len;
+}
+
+int decrypt_aes_openssl(const uint8_t *ciphertext, int ciphertext_len,
+                        const uint8_t *key, const uint8_t *iv,
+                        std::vector<uint8_t> &plaintext)
+{
+    int plaintext_len = 0;
+    EVP_CIPHER_CTX *ctx;
+    int len;
+    // Create and initialize the context
+    if (!(ctx = EVP_CIPHER_CTX_new()))
+    {
+        std::cout << "Error creating context" << std::endl;
+        return -1;
+    }
+    // Initialize the decryption operation
+    if (1 != EVP_DecryptInit_ex(ctx, EVP_aes_128_ctr(), NULL, key, iv))
+    {
+        std::cout << "Error initializing decryption" << std::endl;
+        return -1;
+    }
+    if (1 != EVP_CIPHER_CTX_set_padding(ctx, 0))
+    {
+        std::cout << "Error setting padding" << std::endl;
+        return -1;
+    }
+
+    // Allocate memory for plaintext
+    plaintext.resize(ciphertext_len);
+    // Decrypt ciphertext
+    if (1 != EVP_DecryptUpdate(ctx, plaintext.data(), &len, ciphertext, plaintext.size()))
+    {
+        std::cout << "Error decrypting data" << std::endl;
+        return -1;
+    }
+    plaintext_len = len;
+    // Finalize decryption
+    if (1 != EVP_DecryptFinal_ex(ctx, plaintext.data() + len, &len))
+    {
+        std::cout << "Error finalizing decryption" << std::endl;
+        handleErrors();
+        return -1;
+    }
+    plaintext_len += len;
+    // Clean up
+    EVP_CIPHER_CTX_free(ctx);
+    // std::cout << "Decryption successful, plain text len " << plaintext_len << std::endl;
+
+    return plaintext_len;
+}
 
 /**
  * Encrypt data using AES-GCM
@@ -16,11 +123,11 @@
  * @param tag Output buffer for authentication tag (16 bytes)
  * @return Length of ciphertext or -1 on error
  */
-int encrypt_aes_gcm_openssl(const uint8_t *plaintext, int plaintext_len,
-                            const uint8_t *aad, int aad_len,
-                            const uint8_t *key, uint8_t *iv,
-                            std::vector<uint8_t> &ciphertext,
-                            uint8_t *tag)
+int encrypt_aes_aead_openssl(const uint8_t *plaintext, int plaintext_len,
+                             const uint8_t *aad, int aad_len,
+                             const uint8_t *key, uint8_t *iv,
+                             std::vector<uint8_t> &ciphertext,
+                             uint8_t *tag)
 {
     EVP_CIPHER_CTX *ctx;
     int len;
@@ -92,7 +199,7 @@ int encrypt_aes_gcm_openssl(const uint8_t *plaintext, int plaintext_len,
     // Clean up
     EVP_CIPHER_CTX_free(ctx);
 
-    std::cout << "Encryption successful, cipher text len " << ciphertext_len << std::endl;
+    // std::cout << "Encryption successful, cipher text len " << ciphertext_len << std::endl;
     return ciphertext_len;
 }
 
@@ -109,11 +216,11 @@ int encrypt_aes_gcm_openssl(const uint8_t *plaintext, int plaintext_len,
  * @param plaintext Output buffer for decrypted data
  * @return Length of plaintext or -1 on error
  */
-int decrypt_aes_gcm_openssl(const uint8_t *ciphertext, int ciphertext_len,
-                            const uint8_t *aad, int aad_len,
-                            const uint8_t *tag,
-                            const uint8_t *key, const uint8_t *iv,
-                            std::vector<uint8_t> &plaintext)
+int decrypt_aes_aead_openssl(const uint8_t *ciphertext, int ciphertext_len,
+                             const uint8_t *aad, int aad_len,
+                             const uint8_t *tag,
+                             const uint8_t *key, const uint8_t *iv,
+                             std::vector<uint8_t> &plaintext)
 {
     EVP_CIPHER_CTX *ctx;
     int len;
